@@ -79,14 +79,14 @@ Contient les helpers purs pour:
 - Construire les commandes `yt-dlp`.
 - Parser les tailles de téléchargement.
 - Nommer les variantes de fichiers.
-- Calculer les positions et opacités de logo.
+- Normaliser les ratios de taille/position du logo et les opacités.
 
 ### `video.renderer`
 
 Construit et lance les commandes `ffmpeg` pour:
 
 - Convertir en 9:16.
-- Ajouter un logo.
+- Ajouter un logo dimensionné et positionné par ratios de la résolution cible.
 - Ajouter des sous-titres ASS.
 - Appliquer un effet vidéo.
 - Générer une prévisualisation basse résolution.

@@ -18,8 +18,14 @@ from youtube_script_app.base import (
     format_transcript,
     seconds_to_timestamp,
 )
+from youtube_script_app.core import transcript_fetcher
 from youtube_script_app.core.moment_analyzer import export_most_viewed_csv
 from youtube_script_app.core.transcript_fetcher import setup_logging
+
+
+class FakeRequestBlocked(CouldNotRetrieveTranscript):
+    def __str__(self) -> str:
+        return "YouTube is blocking requests from your IP."
 
 
 def test_extract_video_id_watch() -> None:
@@ -143,11 +149,123 @@ def test_fetch_transcript_wraps_retrieval_errors(monkeypatch: pytest.MonkeyPatch
         "youtube_script_app.core.transcript_fetcher.YouTubeTranscriptApi",
         FakeApi,
     )
+    monkeypatch.setattr(
+        "youtube_script_app.core.transcript_fetcher._fetch_with_yt_dlp",
+        lambda *_args, **_kwargs: None,
+    )
 
     with pytest.raises(TranscriptRetrievalError) as exc_info:
         fetch_transcript("dQw4w9WgXcQ", None)
 
     assert isinstance(exc_info.value.__cause__, CouldNotRetrieveTranscript)
+
+
+def test_fetch_transcript_uses_proxy_config_from_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if transcript_fetcher.GenericProxyConfig is None:
+        pytest.skip("Installed youtube-transcript-api has no proxy config support.")
+
+    instances = []
+
+    class FakeApi:
+        def __init__(self, proxy_config=None):
+            self.proxy_config = proxy_config
+            instances.append(self)
+
+        def fetch(self, video_id: str, languages=("en",), preserve_formatting=False):
+            return [{"text": "Hello", "start": 0.0, "duration": 1.0}]
+
+    monkeypatch.setenv(
+        transcript_fetcher.TRANSCRIPT_HTTP_PROXY_ENV,
+        "http://user:pass@example.test:8080",
+    )
+    monkeypatch.setattr(
+        "youtube_script_app.core.transcript_fetcher.YouTubeTranscriptApi",
+        FakeApi,
+    )
+
+    data, _, _ = fetch_transcript("dQw4w9WgXcQ", None)
+
+    assert data[0]["text"] == "Hello"
+    assert instances[0].proxy_config is not None
+    assert instances[0].proxy_config.to_requests_dict()["http"].startswith(
+        "http://user:pass@example.test"
+    )
+
+
+def test_fetch_transcript_falls_back_to_ytdlp_on_ip_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    caption_url = "https://caption.example.test/en.json3"
+
+    class FakeApi:
+        def fetch(self, video_id: str, languages=("en",), preserve_formatting=False):
+            raise FakeRequestBlocked(video_id)
+
+    class Completed:
+        returncode = 0
+        stderr = ""
+        stdout = json.dumps(
+            {
+                "subtitles": {"en": [{"ext": "json3", "url": caption_url}]},
+                "automatic_captions": {},
+            }
+        )
+
+    class Response:
+        text = json.dumps(
+            {
+                "events": [
+                    {
+                        "tStartMs": 1200,
+                        "dDurationMs": 2400,
+                        "segs": [{"utf8": "Hello "}, {"utf8": "world"}],
+                    }
+                ]
+            }
+        )
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(
+        "youtube_script_app.core.transcript_fetcher.YouTubeTranscriptApi",
+        FakeApi,
+    )
+    monkeypatch.setattr(transcript_fetcher, "_resolve_yt_dlp_cmd", lambda: ["yt-dlp"])
+    monkeypatch.setattr(
+        transcript_fetcher.subprocess, "run", lambda *a, **kw: Completed()
+    )
+    monkeypatch.setattr(transcript_fetcher.requests, "get", lambda *a, **kw: Response())
+
+    data, used_language, available = fetch_transcript("dQw4w9WgXcQ", None)
+
+    assert data == [{"text": "Hello world", "start": 1.2, "duration": 2.4}]
+    assert used_language == "en"
+    assert available == ["en"]
+
+
+def test_fetch_transcript_ip_block_message_mentions_workarounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeApi:
+        def fetch(self, video_id: str, languages=("en",), preserve_formatting=False):
+            raise FakeRequestBlocked(video_id)
+
+    monkeypatch.setattr(
+        "youtube_script_app.core.transcript_fetcher.YouTubeTranscriptApi",
+        FakeApi,
+    )
+    monkeypatch.setattr(transcript_fetcher, "_resolve_yt_dlp_cmd", lambda: None)
+
+    with pytest.raises(TranscriptRetrievalError) as exc_info:
+        fetch_transcript("dQw4w9WgXcQ", None)
+
+    message = str(exc_info.value)
+    assert "YouTube is blocking transcript requests" in message
+    assert transcript_fetcher.TRANSCRIPT_HTTP_PROXY_ENV in message
+    assert transcript_fetcher.WEBSHARE_USERNAME_ENV in message
 
 
 # --- extract_video_id: formats supplémentaires ---

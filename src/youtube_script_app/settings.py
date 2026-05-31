@@ -6,7 +6,8 @@ import json
 import logging
 from pathlib import Path
 
-from .core import subtitle_renderer
+from .core import lower_third, subtitle_renderer
+from .downloads import utils as download_utils
 from .video import presets
 
 DOWNLOAD_LOGO_PLACEHOLDER = "/chemin/vers/logo.png"
@@ -14,19 +15,33 @@ DOWNLOAD_LOGO_PLACEHOLDER = "/chemin/vers/logo.png"
 
 def default_gui_settings() -> dict:
     return {
-        "version": 1,
+        "version": 7,
         "download_aspect_mode": "landscape",
         "video_format": "mp4",
         "clip_duration": 60,
         "download_logo_enabled": True,
         "download_logo_path": "",
-        "download_logo_position": "center",
+        "download_logo_position": download_utils.DEFAULT_LOGO_POSITION,
         "download_logo_size_mode": "relative",
-        "download_logo_scale_percent": 58,
+        "download_logo_scale_percent": download_utils.DEFAULT_LOGO_SCALE_PERCENT,
         "download_logo_opacity_percent": 100,
+        "download_logo_width_ratio": download_utils.DEFAULT_LOGO_WIDTH_RATIO,
+        "download_logo_x_ratio": download_utils.DEFAULT_LOGO_X_RATIO,
+        "download_logo_y_ratio": download_utils.DEFAULT_LOGO_Y_RATIO,
         "download_subtitles_enabled": True,
         "download_subtitle_style": "impact",
         "download_video_effect": "none",
+        "download_intro_outro_enabled": False,
+        "download_progress_bar_enabled": False,
+        "download_animated_watermark_enabled": False,
+        "download_lower_third_enabled": False,
+        "download_lower_third_name": "",
+        "download_lower_third_tagline": "",
+        "download_lower_third_subscribe": True,
+        "download_lower_third_bg_color": lower_third.DEFAULT_BG_COLOR,
+        "download_lower_third_accent_color": lower_third.DEFAULT_ACCENT_COLOR,
+        "download_lower_third_interval": lower_third.DEFAULT_DISPLAY_INTERVAL_SECONDS,
+        "download_lower_third_display_duration": lower_third.DEFAULT_DISPLAY_DURATION_SECONDS,
         "download_preset": "custom",
     }
 
@@ -76,9 +91,16 @@ def normalize_gui_settings(raw: object) -> dict:
         logo_path = ""
     settings["download_logo_path"] = logo_path
 
-    logo_position = str(raw.get("download_logo_position", "")).strip().lower()
-    if logo_position not in {"top", "center", "bottom"}:
-        logo_position = settings["download_logo_position"]
+    try:
+        settings_version = int(raw.get("version", 1))
+    except (TypeError, ValueError):
+        settings_version = 1
+
+    logo_position = download_utils.normalize_logo_position(
+        raw.get("download_logo_position", settings["download_logo_position"])
+    )
+    if settings_version < 3 and logo_position == "bottom-right":
+        logo_position = download_utils.DEFAULT_LOGO_POSITION
     settings["download_logo_position"] = logo_position
 
     logo_size_mode = str(raw.get("download_logo_size_mode", "")).strip().lower()
@@ -96,6 +118,31 @@ def normalize_gui_settings(raw: object) -> dict:
     except (TypeError, ValueError):
         logo_scale_percent = settings["download_logo_scale_percent"]
     settings["download_logo_scale_percent"] = max(20, min(80, logo_scale_percent))
+
+    width_source = raw.get("download_logo_width_ratio")
+    if width_source is None:
+        logo_width_ratio = download_utils.logo_scale_percent_to_width_ratio(
+            settings["download_logo_scale_percent"]
+        )
+    else:
+        logo_width_ratio = download_utils.normalize_logo_width_ratio(width_source)
+    settings["download_logo_width_ratio"] = logo_width_ratio
+
+    x_source = raw.get("download_logo_x_ratio")
+    y_source = raw.get("download_logo_y_ratio")
+    if x_source is None or y_source is None:
+        logo_x_ratio, logo_y_ratio = download_utils.logo_position_to_ratios(
+            settings["download_logo_position"],
+            logo_width_ratio,
+        )
+    else:
+        logo_x_ratio = download_utils.normalize_logo_x_ratio(
+            x_source,
+            logo_width_ratio,
+        )
+        logo_y_ratio = download_utils.normalize_logo_y_ratio(y_source)
+    settings["download_logo_x_ratio"] = logo_x_ratio
+    settings["download_logo_y_ratio"] = logo_y_ratio
 
     try:
         logo_opacity_percent = int(
@@ -120,6 +167,101 @@ def normalize_gui_settings(raw: object) -> dict:
     )
     settings["download_video_effect"] = subtitle_renderer.normalize_video_effect(
         raw.get("download_video_effect", settings["download_video_effect"])
+    )
+    settings["download_intro_outro_enabled"] = coerce_bool(
+        raw.get(
+            "download_intro_outro_enabled",
+            settings["download_intro_outro_enabled"],
+        ),
+        settings["download_intro_outro_enabled"],
+    )
+    settings["download_progress_bar_enabled"] = coerce_bool(
+        raw.get(
+            "download_progress_bar_enabled",
+            settings["download_progress_bar_enabled"],
+        ),
+        settings["download_progress_bar_enabled"],
+    )
+    settings["download_animated_watermark_enabled"] = coerce_bool(
+        raw.get(
+            "download_animated_watermark_enabled",
+            settings["download_animated_watermark_enabled"],
+        ),
+        settings["download_animated_watermark_enabled"],
+    )
+    settings["download_lower_third_enabled"] = coerce_bool(
+        raw.get(
+            "download_lower_third_enabled",
+            settings["download_lower_third_enabled"],
+        ),
+        settings["download_lower_third_enabled"],
+    )
+    settings["download_lower_third_name"] = " ".join(
+        str(
+            raw.get(
+                "download_lower_third_name",
+                settings["download_lower_third_name"],
+            )
+        ).split()
+    )[:80]
+    settings["download_lower_third_tagline"] = " ".join(
+        str(
+            raw.get(
+                "download_lower_third_tagline",
+                settings["download_lower_third_tagline"],
+            )
+        ).split()
+    )[:100]
+    settings["download_lower_third_subscribe"] = coerce_bool(
+        raw.get(
+            "download_lower_third_subscribe",
+            settings["download_lower_third_subscribe"],
+        ),
+        settings["download_lower_third_subscribe"],
+    )
+    settings["download_lower_third_bg_color"] = lower_third.normalize_hex_color(
+        raw.get(
+            "download_lower_third_bg_color",
+            settings["download_lower_third_bg_color"],
+        ),
+        lower_third.DEFAULT_BG_COLOR,
+    )
+    settings["download_lower_third_accent_color"] = lower_third.normalize_hex_color(
+        raw.get(
+            "download_lower_third_accent_color",
+            settings["download_lower_third_accent_color"],
+        ),
+        lower_third.DEFAULT_ACCENT_COLOR,
+    )
+    try:
+        lower_third_interval = int(
+            raw.get(
+                "download_lower_third_interval",
+                settings["download_lower_third_interval"],
+            )
+        )
+    except (TypeError, ValueError):
+        lower_third_interval = settings["download_lower_third_interval"]
+    settings["download_lower_third_interval"] = max(
+        lower_third.MIN_DISPLAY_INTERVAL_SECONDS,
+        min(lower_third.MAX_DISPLAY_INTERVAL_SECONDS, lower_third_interval),
+    )
+
+    try:
+        lower_third_display_duration = int(
+            raw.get(
+                "download_lower_third_display_duration",
+                settings["download_lower_third_display_duration"],
+            )
+        )
+    except (TypeError, ValueError):
+        lower_third_display_duration = settings["download_lower_third_display_duration"]
+    settings["download_lower_third_display_duration"] = max(
+        lower_third.MIN_DISPLAY_DURATION_SECONDS,
+        min(
+            lower_third.MAX_DISPLAY_DURATION_SECONDS,
+            lower_third_display_duration,
+        ),
     )
     settings["download_preset"] = presets.normalize_preset_key(
         raw.get("download_preset", settings["download_preset"])

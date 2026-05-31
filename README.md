@@ -99,9 +99,9 @@ python -m youtube_script_app.gui
    - Choisir **Format final** : `Normal 16:9` (horizontal) ou `Short 9:16` (vertical).
    - Les options de téléchargement (16:9/9:16, format, durée, logo, position, taille, opacité) sont mémorisées automatiquement pour les prochains lancements.
    - Cocher/Décocher **Intégrer le logo** pour l’activer ou non sur les clips et la vidéo entière.
-   - Choisir un **Logo à intégrer** (PNG/JPG/WebP), puis sa **Position** (`Haut`, `Milieu`, `Bas`).
-   - Choisir **Mode taille logo** : `Taille originale` conserve les dimensions du fichier logo ; `Personnalisée` active le curseur.
-   - Ajuster **Taille logo** (curseur de 20% à 80% de la taille originale du logo en mode personnalisé) pour régler sa visibilité sans modifier le code.
+   - Choisir un **Logo à intégrer** (PNG/JPG/WebP), puis sa **Position** sur une grille de 9 zones (`Haut droit` par défaut).
+   - Ajuster **Taille logo** (curseur de 20% à 80%) pour régler sa largeur relative ; l’interface indique aussi le pourcentage réel de largeur vidéo.
+   - Déplacer le logo dans l’**Aperçu logo** pour ajuster sa position en ratios, réutilisés à chaque rendu.
    - Ajuster **Opacité logo** (curseur de 10% à 100%) pour le rendre discret ou très visible.
    - Cocher **Ajouter sous-titres** pour incruster les sous-titres dans les clips générés à partir de la transcription récupérée.
    - Choisir un **Design sous-titres** : `Impact TikTok`, `Moderne blanc`, `Cinéma`, `Boîte noire` ou `Minimal`.

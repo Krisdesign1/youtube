@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 import os
@@ -15,13 +16,15 @@ import tkinter as tk
 import tkinter.font as tkfont
 import webbrowser
 from pathlib import Path
-from tkinter import filedialog, messagebox, scrolledtext
+from tkinter import colorchooser, filedialog, messagebox, scrolledtext
 from tkinter import ttk
 from typing import List, Optional
 
+from PIL import Image, ImageTk
+
 from .downloads import history as history_store
 from .downloads import utils as download_utils
-from .core import subtitle_renderer
+from .core import lower_third, subtitle_renderer
 from .base import (
     LOGGER,
     OUTPUT_FORMATS,
@@ -43,6 +46,7 @@ from .settings import (
 )
 from .video import renderer as video_renderer
 from .video import presets as video_presets
+from .video.logo_config import LogoConfig
 
 TIMESTAMP_RE = re.compile(r"^\[(\d{2}:\d{2}(?::\d{2})?)\]")
 BRACKET_RE = re.compile(r"\[[^\]]+\]")
@@ -65,6 +69,67 @@ COMMON_TOOL_DIRS = (
     "/sbin",
 )
 
+THEME = {
+    "bg": "#f7f8fc",
+    "bg_alt": "#edf0f8",
+    "card": "#ffffff",
+    "shadow": "#d4daea",
+    "text": "#0d0d1a",
+    "muted": "#5a6482",
+    "accent": "#5b5bd6",
+    "accent_dark": "#4444b8",
+    "secondary": "#7c3aed",
+    "success": "#059669",
+    "danger": "#dc2626",
+    "border": "#dde2f0",
+    "select": "#ede9fe",
+    "hero": "#1a1040",
+    "hero_mid": "#261550",
+    "hero_text": "#eeeeff",
+    "hero_muted": "#a5b4fc",
+    "hero_stripe": "#6366f1",
+    "hero_stripe_alt": "#7c3aed",
+    "hero_stripe_hot": "#a855f7",
+    "hero_stripe_dark": "#4f46e5",
+    "white": "#ffffff",
+    "button_hover": "#e0e4f8",
+    "button_disabled": "#eaecf6",
+    "primary_disabled": "#9b9bd4",
+    "primary_disabled_text": "#e8e8f5",
+    "secondary_hover": "#f0eeff",
+    "secondary_disabled": "#f5f6fb",
+    "secondary_disabled_text": "#9aa0be",
+    "soft_primary": "#ebebff",
+    "soft_primary_hover": "#ddddf8",
+    "soft_primary_disabled": "#f0f0ff",
+    "subtle": "#f4f5fb",
+    "subtle_hover": "#e8eaf6",
+    "placeholder_bg": "#f3f1ff",
+    "placeholder_text": "#7b82aa",
+    "canvas_grid": "#d8deeb",
+    "disabled_outline": "#a8b0c2",
+    "disabled_fill": "#e5e7ef",
+    "status_error": "#b91c1c",
+    "timestamp": "#7b8aa8",
+}
+
+SPACING = {
+    "xs": 4,
+    "sm": 8,
+    "md": 16,
+    "lg": 24,
+    "xl": 32,
+    "2xl": 48,
+}
+
+BUTTON_VARIANTS = {
+    "primary": "Primary.TButton",
+    "secondary": "Secondary.TButton",
+    "soft": "SoftPrimary.TButton",
+    "tertiary": "Subtle.TButton",
+    "link": "Link.TButton",
+}
+
 
 class TranscriptApp:
     """Simple GUI wrapper around the CLI transcript generator."""
@@ -72,6 +137,7 @@ class TranscriptApp:
     def __init__(self, master: tk.Tk) -> None:
         self.master = master
         master.title("Générateur de script YouTube")
+        master.minsize(900, 600)
         master.resizable(True, True)
 
         self.style = ttk.Style(master)
@@ -96,19 +162,40 @@ class TranscriptApp:
         self.download_logo_enabled_var = tk.BooleanVar(value=True)
         self.download_logo_var = tk.StringVar()
         self.download_logo_size_mode_lookup = {
-            "Taille originale": "original",
-            "Personnalisée": "relative",
+            "Taille relative": "relative",
+            "Taille originale (max 30%)": "original",
         }
-        self.download_logo_size_mode_var = tk.StringVar(value="Personnalisée")
-        self.download_logo_size_var = tk.IntVar(value=58)
-        self.download_logo_size_label_var = tk.StringVar(value="58%")
+        self.download_logo_size_mode_var = tk.StringVar(value="Taille relative")
+        self.download_logo_size_var = tk.IntVar(
+            value=download_utils.DEFAULT_LOGO_SCALE_PERCENT
+        )
+        self.download_logo_size_label_var = tk.StringVar(
+            value=self._download_logo_size_label(
+                download_utils.DEFAULT_LOGO_SCALE_PERCENT
+            )
+        )
+        self.download_logo_width_ratio_var = tk.DoubleVar(
+            value=download_utils.DEFAULT_LOGO_WIDTH_RATIO
+        )
+        self.download_logo_x_ratio_var = tk.DoubleVar(
+            value=download_utils.DEFAULT_LOGO_X_RATIO
+        )
+        self.download_logo_y_ratio_var = tk.DoubleVar(
+            value=download_utils.DEFAULT_LOGO_Y_RATIO
+        )
         self.download_logo_opacity_var = tk.IntVar(value=100)
         self.download_logo_opacity_label_var = tk.StringVar(value="100%")
-        self.download_logo_position_var = tk.StringVar(value="Milieu")
+        self.download_logo_position_var = tk.StringVar(value="Haut droit")
         self.download_logo_position_lookup = {
-            "Haut": "top",
-            "Milieu": "center",
-            "Bas": "bottom",
+            "Haut gauche": "top-left",
+            "Haut centre": "top",
+            "Haut droit": "top-right",
+            "Centre gauche": "center-left",
+            "Centre": "center",
+            "Centre droit": "center-right",
+            "Bas gauche": "bottom-left",
+            "Bas centre": "bottom",
+            "Bas droit": "bottom-right",
         }
         self.download_subtitles_enabled_var = tk.BooleanVar(value=True)
         self.download_subtitle_style_lookup = {
@@ -127,6 +214,31 @@ class TranscriptApp:
             "Vintage": "vintage",
         }
         self.download_video_effect_var = tk.StringVar(value="Aucun")
+        self.download_intro_outro_enabled_var = tk.BooleanVar(value=False)
+        self.download_progress_bar_enabled_var = tk.BooleanVar(value=False)
+        self.download_animated_watermark_enabled_var = tk.BooleanVar(value=False)
+        self.download_lower_third_enabled_var = tk.BooleanVar(value=False)
+        self.download_lower_third_name_var = tk.StringVar(value="")
+        self.download_lower_third_tagline_var = tk.StringVar(value="")
+        self.download_lower_third_subscribe_var = tk.BooleanVar(value=True)
+        self.download_lower_third_bg_color_var = tk.StringVar(
+            value=lower_third.DEFAULT_BG_COLOR
+        )
+        self.download_lower_third_accent_color_var = tk.StringVar(
+            value=lower_third.DEFAULT_ACCENT_COLOR
+        )
+        self.download_lower_third_interval_var = tk.IntVar(
+            value=lower_third.DEFAULT_DISPLAY_INTERVAL_SECONDS
+        )
+        self.download_lower_third_interval_label_var = tk.StringVar(
+            value=f"{lower_third.DEFAULT_DISPLAY_INTERVAL_SECONDS}s"
+        )
+        self.download_lower_third_display_duration_var = tk.IntVar(
+            value=lower_third.DEFAULT_DISPLAY_DURATION_SECONDS
+        )
+        self.download_lower_third_display_duration_label_var = tk.StringVar(
+            value=f"{lower_third.DEFAULT_DISPLAY_DURATION_SECONDS}s"
+        )
         self.status_var = tk.StringVar(value="Prêt.")
         self.meta_var = tk.StringVar(value="")
         self.stats_var = tk.StringVar(value="Lignes: 0 | Caractères: 0")
@@ -174,7 +286,7 @@ class TranscriptApp:
             "write", lambda *args: self.master.after_idle(self._update_generate_state)
         )
         self.download_aspect_ratio_var.trace_add(
-            "write", self._on_download_preferences_change
+            "write", self._on_download_aspect_change
         )
         self.download_preset_var.trace_add("write", self._on_download_preset_change)
         self.video_format_var.trace_add("write", self._on_download_preferences_change)
@@ -183,12 +295,21 @@ class TranscriptApp:
             "write", self._on_download_preferences_change
         )
         self.download_logo_position_var.trace_add(
-            "write", self._on_download_preferences_change
+            "write", self._on_download_logo_position_change
         )
         self.download_logo_size_mode_var.trace_add(
             "write", self._on_download_logo_size_mode_change
         )
         self.download_logo_size_var.trace_add(
+            "write", self._on_download_preferences_change
+        )
+        self.download_logo_width_ratio_var.trace_add(
+            "write", self._on_download_preferences_change
+        )
+        self.download_logo_x_ratio_var.trace_add(
+            "write", self._on_download_preferences_change
+        )
+        self.download_logo_y_ratio_var.trace_add(
             "write", self._on_download_preferences_change
         )
         self.download_logo_opacity_var.trace_add(
@@ -203,6 +324,39 @@ class TranscriptApp:
         self.download_video_effect_var.trace_add(
             "write", self._on_download_preferences_change
         )
+        self.download_intro_outro_enabled_var.trace_add(
+            "write", self._on_value_add_change
+        )
+        self.download_progress_bar_enabled_var.trace_add(
+            "write", self._on_value_add_change
+        )
+        self.download_animated_watermark_enabled_var.trace_add(
+            "write", self._on_value_add_change
+        )
+        self.download_lower_third_enabled_var.trace_add(
+            "write", self._on_lower_third_change
+        )
+        self.download_lower_third_name_var.trace_add(
+            "write", self._on_download_preferences_change
+        )
+        self.download_lower_third_tagline_var.trace_add(
+            "write", self._on_download_preferences_change
+        )
+        self.download_lower_third_subscribe_var.trace_add(
+            "write", self._on_download_preferences_change
+        )
+        self.download_lower_third_bg_color_var.trace_add(
+            "write", self._on_lower_third_color_change
+        )
+        self.download_lower_third_accent_color_var.trace_add(
+            "write", self._on_lower_third_color_change
+        )
+        self.download_lower_third_interval_var.trace_add(
+            "write", self._on_lower_third_timing_change
+        )
+        self.download_lower_third_display_duration_var.trace_add(
+            "write", self._on_lower_third_timing_change
+        )
         self.download_logo_entry.bind(
             "<FocusOut>", self._on_download_logo_focus_out, add="+"
         )
@@ -210,26 +364,8 @@ class TranscriptApp:
         self._bind_shortcuts()
 
     def _apply_blue_theme(self) -> None:
-        self.palette = {
-            "bg": "#f7f8fc",
-            "bg_alt": "#edf0f8",
-            "card": "#ffffff",
-            "shadow": "#d4daea",
-            "text": "#0d0d1a",
-            "muted": "#5a6482",
-            "accent": "#5b5bd6",
-            "accent_dark": "#4444b8",
-            "secondary": "#7c3aed",
-            "success": "#059669",
-            "danger": "#dc2626",
-            "border": "#dde2f0",
-            "select": "#ede9fe",
-            "hero": "#1a1040",
-            "hero_mid": "#261550",
-            "hero_text": "#eeeeff",
-            "hero_muted": "#a5b4fc",
-            "hero_stripe": "#6366f1",
-        }
+        self.palette = dict(THEME)
+        self.spacing = dict(SPACING)
         self.font_family = self._pick_font_family(
             ["Avenir Next", "SF Pro Text", "SF Pro Display", "Montserrat", "Poppins", "Inter", "Segoe UI"],
             fallback="Helvetica",
@@ -301,17 +437,20 @@ class TranscriptApp:
             "TButton",
             background=self.palette["bg_alt"],
             foreground=self.palette["accent"],
-            padding=(12, 7),
+            padding=(self.spacing["md"] - self.spacing["xs"], 7),
             font=font_main,
         )
         self.style.map(
             "TButton",
-            background=[("active", "#e0e4f8"), ("disabled", "#eaecf6")],
+            background=[
+                ("active", self.palette["button_hover"]),
+                ("disabled", self.palette["button_disabled"]),
+            ],
         )
         self.style.configure(
             "Primary.TButton",
             background=self.palette["accent"],
-            foreground="#ffffff",
+            foreground=self.palette["white"],
             padding=(22, 13),
             font=font_button,
         )
@@ -319,13 +458,13 @@ class TranscriptApp:
             "Primary.TButton",
             background=[
                 ("active", self.palette["accent_dark"]),
-                ("disabled", "#9b9bd4"),
+                ("disabled", self.palette["primary_disabled"]),
             ],
-            foreground=[("disabled", "#e8e8f5")],
+            foreground=[("disabled", self.palette["primary_disabled_text"])],
         )
         self.style.configure(
             "Secondary.TButton",
-            background="#ffffff",
+            background=self.palette["card"],
             foreground=self.palette["muted"],
             padding=(11, 8),
             font=font_main,
@@ -333,24 +472,30 @@ class TranscriptApp:
         )
         self.style.map(
             "Secondary.TButton",
-            background=[("active", "#f0eeff"), ("disabled", "#f5f6fb")],
-            foreground=[("active", self.palette["accent"]), ("disabled", "#9aa0be")],
+            background=[
+                ("active", self.palette["secondary_hover"]),
+                ("disabled", self.palette["secondary_disabled"]),
+            ],
+            foreground=[
+                ("active", self.palette["accent"]),
+                ("disabled", self.palette["secondary_disabled_text"]),
+            ],
         )
         self.style.configure(
             "TEntry",
-            fieldbackground="#ffffff",
+            fieldbackground=self.palette["card"],
             foreground=self.palette["text"],
             bordercolor=self.palette["border"],
         )
         self.style.configure(
             "Normal.TEntry",
-            fieldbackground="#ffffff",
+            fieldbackground=self.palette["card"],
             foreground=self.palette["text"],
         )
         self.style.configure(
             "Placeholder.TEntry",
-            fieldbackground="#f3f1ff",
-            foreground="#7b82aa",
+            fieldbackground=self.palette["placeholder_bg"],
+            foreground=self.palette["placeholder_text"],
         )
         self.style.configure(
             "TCheckbutton",
@@ -412,7 +557,7 @@ class TranscriptApp:
         )
         self.style.configure(
             "SoftPrimary.TButton",
-            background="#ebebff",
+            background=self.palette["soft_primary"],
             foreground=self.palette["accent"],
             padding=(13, 9),
             font=font_main,
@@ -420,12 +565,18 @@ class TranscriptApp:
         )
         self.style.map(
             "SoftPrimary.TButton",
-            background=[("active", "#ddddf8"), ("disabled", "#f0f0ff")],
-            foreground=[("active", self.palette["accent_dark"]), ("disabled", "#94a3b8")],
+            background=[
+                ("active", self.palette["soft_primary_hover"]),
+                ("disabled", self.palette["soft_primary_disabled"]),
+            ],
+            foreground=[
+                ("active", self.palette["accent_dark"]),
+                ("disabled", self.palette["secondary_disabled_text"]),
+            ],
         )
         self.style.configure(
             "Subtle.TButton",
-            background="#f4f5fb",
+            background=self.palette["subtle"],
             foreground=self.palette["muted"],
             padding=(9, 6),
             font=font_subtle,
@@ -433,8 +584,14 @@ class TranscriptApp:
         )
         self.style.map(
             "Subtle.TButton",
-            background=[("active", "#e8eaf6"), ("disabled", "#f1f3f9")],
-            foreground=[("active", self.palette["accent"]), ("disabled", "#9aa0be")],
+            background=[
+                ("active", self.palette["subtle_hover"]),
+                ("disabled", self.palette["secondary_disabled"]),
+            ],
+            foreground=[
+                ("active", self.palette["accent"]),
+                ("disabled", self.palette["secondary_disabled_text"]),
+            ],
         )
         self.style.map(
             "Link.TButton",
@@ -443,7 +600,7 @@ class TranscriptApp:
         )
         self.style.configure(
             "TCombobox",
-            fieldbackground="#ffffff",
+            fieldbackground=self.palette["card"],
             foreground=self.palette["text"],
         )
         self.style.configure(
@@ -470,6 +627,18 @@ class TranscriptApp:
                 return name
         return fallback
 
+    def _button(
+        self,
+        parent: tk.Misc,
+        *,
+        text: str,
+        command,
+        variant: str = "secondary",
+        **kwargs,
+    ) -> ttk.Button:
+        style = BUTTON_VARIANTS.get(variant, BUTTON_VARIANTS["secondary"])
+        return ttk.Button(parent, text=text, command=command, style=style, **kwargs)
+
     def _center_container(self) -> None:
         self.master.bind("<Configure>", self._on_root_resize)
         self._on_root_resize()
@@ -480,9 +649,8 @@ class TranscriptApp:
         width = self.master.winfo_width()
         if width <= 1:
             width = self.master.winfo_screenwidth()
-        extra = max(0, width - self._content_max_width)
-        side = max(self._content_padding, int(extra / 2))
-        self._content_container.configure(padding=(side, self._content_padding))
+        horizontal = self.spacing["md"] if width < 960 else self.spacing["lg"]
+        self._content_container.configure(padding=(horizontal, self.spacing["lg"]))
 
     def _on_main_view_configure(self, event: tk.Event | None = None) -> None:
         self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
@@ -577,10 +745,8 @@ class TranscriptApp:
         container = ttk.Frame(self.main_view, padding=(24, 20))
         container.grid(row=0, column=0, sticky="nsew")
         container.grid_columnconfigure(0, weight=1)
-        container.grid_rowconfigure(5, weight=1)
+        container.grid_rowconfigure(6, weight=1)
         self._content_container = container
-        self._content_max_width = 1200
-        self._content_padding = 18
         self._center_container()
         self._bind_main_scroll()
 
@@ -616,7 +782,7 @@ class TranscriptApp:
             title_row,
             text="  STUDIO  ",
             bg=self.palette["hero_stripe"],
-            fg="#ffffff",
+            fg=self.palette["white"],
             font=(self.font_family, 8, "bold"),
             padx=2,
             pady=1,
@@ -634,18 +800,18 @@ class TranscriptApp:
 
         nav_buttons = tk.Frame(header_frame, bg=self.palette["hero"])
         nav_buttons.grid(row=0, column=1, rowspan=2, sticky="ne")
-        self.scroll_top_button = ttk.Button(
+        self.scroll_top_button = self._button(
             nav_buttons,
             text="↑ Haut",
             command=self.scroll_to_top,
-            style="Secondary.TButton",
+            variant="tertiary",
         )
         self.scroll_top_button.grid(row=0, column=0, sticky="ew")
-        self.scroll_bottom_button = ttk.Button(
+        self.scroll_bottom_button = self._button(
             nav_buttons,
             text="↓ Bas",
             command=self.scroll_to_bottom,
-            style="Secondary.TButton",
+            variant="tertiary",
         )
         self.scroll_bottom_button.grid(row=1, column=0, sticky="ew", pady=(8, 0))
 
@@ -658,7 +824,11 @@ class TranscriptApp:
         )
         stripe_canvas.grid(row=1, column=0, sticky="ew")
         stripe_colors = [
-            "#6366f1", "#7c3aed", "#a855f7", "#6366f1", "#4f46e5",
+            self.palette["hero_stripe"],
+            self.palette["hero_stripe_alt"],
+            self.palette["hero_stripe_hot"],
+            self.palette["hero_stripe"],
+            self.palette["hero_stripe_dark"],
         ]
 
         def _draw_stripe(event: tk.Event | None = None) -> None:
@@ -675,6 +845,7 @@ class TranscriptApp:
 
         url_shadow = tk.Frame(container, bg=self.palette["shadow"])
         url_shadow.grid(row=1, column=0, sticky="ew", pady=(0, 14))
+        url_shadow.grid_columnconfigure(0, weight=1)
         url_card = tk.Frame(url_shadow, bg=self.palette["card"])
         url_card.grid(row=0, column=0, sticky="ew", padx=1, pady=1)
         url_card.grid_columnconfigure(1, weight=1)
@@ -701,17 +872,17 @@ class TranscriptApp:
         url_actions = tk.Frame(url_card, bg=self.palette["card"])
         url_actions.grid(row=2, column=0, columnspan=2, sticky="ew", padx=16, pady=(10, 14))
         url_actions.grid_columnconfigure(2, weight=1)
-        ttk.Button(
+        self._button(
             url_actions,
-            text="📋 Coller l'URL",
+            text="Coller l'URL",
             command=self.paste_url,
-            style="SoftPrimary.TButton",
+            variant="tertiary",
         ).grid(row=0, column=0, sticky="w")
-        self.preview_video_button = ttk.Button(
+        self.preview_video_button = self._button(
             url_actions,
-            text="▶ Voir la vidéo",
+            text="Voir la vidéo",
             command=self.preview_video,
-            style="Secondary.TButton",
+            variant="tertiary",
         )
         self.preview_video_button.grid(row=0, column=1, sticky="w", padx=(10, 0))
 
@@ -721,34 +892,111 @@ class TranscriptApp:
         quick_actions.grid_columnconfigure(1, weight=1)
         quick_actions.grid_columnconfigure(2, weight=1)
 
-        self.quick_transcribe_button = ttk.Button(
+        self.quick_transcribe_button = self._button(
             quick_actions,
             text="Transcription YouTube",
             command=self.generate,
-            style="Primary.TButton",
+            variant="primary",
         )
         self.quick_transcribe_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
 
-        self.quick_download_full_video_button = ttk.Button(
+        self.quick_download_full_video_button = self._button(
             quick_actions,
-            text="⬇ Télécharger vidéo",
+            text="Télécharger vidéo",
             command=self.download_full_video,
-            style="Secondary.TButton",
+            variant="secondary",
         )
         self.quick_download_full_video_button.grid(row=0, column=1, sticky="ew", padx=6)
 
-        self.quick_download_audio_button = ttk.Button(
+        self.quick_download_audio_button = self._button(
             quick_actions,
-            text="🎵 Télécharger audio",
+            text="Télécharger audio",
             command=self.download_audio_only,
-            style="Secondary.TButton",
+            variant="secondary",
         )
         self.quick_download_audio_button.grid(row=0, column=2, sticky="ew", padx=(6, 0))
 
         self._apply_placeholder(self.url_entry, "https://www.youtube.com/watch?v=... ou lien social")
 
+        download_status_shadow = tk.Frame(container, bg=self.palette["shadow"])
+        download_status_shadow.grid(row=2, column=0, sticky="ew", pady=(0, 14))
+        download_status_shadow.grid_columnconfigure(0, weight=1)
+        download_status_card = tk.Frame(download_status_shadow, bg=self.palette["card"])
+        download_status_card.grid(row=0, column=0, sticky="ew", padx=1, pady=1)
+        download_status_card.grid_columnconfigure(0, weight=1)
+
+        download_status_header = tk.Frame(download_status_card, bg=self.palette["card"])
+        download_status_header.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 6))
+        download_status_header.grid_columnconfigure(0, weight=1)
+
+        ttk.Label(
+            download_status_header,
+            text="Suivi des téléchargements",
+            style="CardTitle.TLabel",
+        ).grid(row=0, column=0, sticky="w")
+
+        download_status_right = tk.Frame(download_status_header, bg=self.palette["card"])
+        download_status_right.grid(row=0, column=1, sticky="e")
+        ttk.Label(
+            download_status_right,
+            textvariable=self.download_summary_var,
+            style="CardMuted.TLabel",
+        ).grid(row=0, column=0, sticky="e", padx=(0, 10))
+        self.download_toggle_button = ttk.Button(
+            download_status_right,
+            text="Voir les détails techniques",
+            command=self.toggle_download_logs,
+            style="Link.TButton",
+        )
+        self.download_toggle_button.grid(row=0, column=1, sticky="e")
+
+        self.download_overall_progress = ttk.Progressbar(
+            download_status_card,
+            mode="determinate",
+            maximum=1,
+            value=0,
+            style="Blue.Horizontal.TProgressbar",
+        )
+        self.download_overall_progress.grid(
+            row=1, column=0, sticky="ew", padx=16, pady=(4, 4)
+        )
+
+        self.download_current_progress = ttk.Progressbar(
+            download_status_card,
+            mode="determinate",
+            maximum=100,
+            value=0,
+            style="Blue.Horizontal.TProgressbar",
+        )
+        self.download_current_progress.grid(
+            row=2, column=0, sticky="ew", padx=16, pady=(0, 8)
+        )
+
+        ttk.Label(
+            download_status_card,
+            textvariable=self.download_detail_var,
+            style="CardMuted.TLabel",
+        ).grid(row=3, column=0, sticky="w", padx=16)
+        ttk.Label(
+            download_status_card,
+            textvariable=self.download_phase_var,
+            style="CardMuted.TLabel",
+        ).grid(row=4, column=0, sticky="w", padx=16, pady=(4, 0))
+
+        self.download_log = scrolledtext.ScrolledText(
+            download_status_card,
+            wrap=tk.WORD,
+            height=4,
+            font=(self.mono_family, 9),
+        )
+        self.download_log.grid(row=5, column=0, sticky="ew", padx=16, pady=(8, 16))
+        self.download_log.configure(state="disabled")
+        self._style_text_widget(self.download_log, background=self.palette["bg_alt"])
+        self.download_log.grid_remove()
+
         options_shadow = tk.Frame(container, bg=self.palette["shadow"])
-        options_shadow.grid(row=2, column=0, sticky="ew", pady=(0, 14))
+        options_shadow.grid(row=3, column=0, sticky="ew", pady=(0, 14))
+        options_shadow.grid_columnconfigure(0, weight=1)
         options_card = tk.Frame(options_shadow, bg=self.palette["card"])
         options_card.grid(row=0, column=0, sticky="ew", padx=1, pady=1)
         options_card.grid_columnconfigure(0, weight=1)
@@ -924,29 +1172,40 @@ class TranscriptApp:
             textvariable=self.download_logo_position_var,
             values=list(self.download_logo_position_lookup.keys()),
             state="readonly",
-            width=12,
+            width=16,
         )
         self.download_logo_position_combo.grid(
             row=0, column=1, sticky="w", padx=(10, 0)
         )
 
-        logo_size_mode_row = tk.Frame(self.options_body, bg=self.palette["card"])
-        logo_size_mode_row.grid(row=13, column=0, sticky="ew", pady=(8, 0))
-        logo_size_mode_row.grid_columnconfigure(0, weight=1)
+        logo_preview_row = tk.Frame(self.options_body, bg=self.palette["card"])
+        logo_preview_row.grid(row=13, column=0, sticky="ew", pady=(8, 0))
+        logo_preview_row.grid_columnconfigure(0, weight=1)
         ttk.Label(
-            logo_size_mode_row,
-            text="Mode taille logo",
+            logo_preview_row,
+            text="Aperçu logo",
             style="Card.TLabel",
         ).grid(row=0, column=0, sticky="w")
-        self.download_logo_size_mode_combo = ttk.Combobox(
-            logo_size_mode_row,
-            textvariable=self.download_logo_size_mode_var,
-            values=list(self.download_logo_size_mode_lookup.keys()),
-            state="readonly",
-            width=18,
+        self.download_logo_preview_canvas = tk.Canvas(
+            logo_preview_row,
+            width=280,
+            height=158,
+            bg=self.palette["bg_alt"],
+            highlightthickness=1,
+            highlightbackground=self.palette["shadow"],
+            cursor="hand2",
         )
-        self.download_logo_size_mode_combo.grid(
-            row=0, column=1, sticky="w", padx=(10, 0)
+        self.download_logo_preview_canvas.grid(
+            row=1, column=0, sticky="w", pady=(6, 0)
+        )
+        self.download_logo_preview_canvas.bind(
+            "<Configure>", lambda _event: self._redraw_logo_preview()
+        )
+        self.download_logo_preview_canvas.bind(
+            "<ButtonPress-1>", self._on_logo_preview_press
+        )
+        self.download_logo_preview_canvas.bind(
+            "<B1-Motion>", self._on_logo_preview_drag
         )
 
         logo_size_row = tk.Frame(self.options_body, bg=self.palette["card"])
@@ -960,6 +1219,19 @@ class TranscriptApp:
             textvariable=self.download_logo_size_label_var,
             style="CardMuted.TLabel",
         ).grid(row=0, column=1, sticky="e")
+        logo_size_mode_row = tk.Frame(logo_size_row, bg=self.palette["card"])
+        logo_size_mode_row.grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Label(logo_size_mode_row, text="Mode", style="Card.TLabel").grid(
+            row=0, column=0, sticky="w"
+        )
+        self.download_logo_size_mode_combo = ttk.Combobox(
+            logo_size_mode_row,
+            textvariable=self.download_logo_size_mode_var,
+            values=list(self.download_logo_size_mode_lookup.keys()),
+            state="readonly",
+            width=26,
+        )
+        self.download_logo_size_mode_combo.grid(row=0, column=1, sticky="w", padx=(10, 0))
         self.download_logo_size_scale = ttk.Scale(
             logo_size_row,
             from_=20,
@@ -969,7 +1241,7 @@ class TranscriptApp:
             command=self._on_logo_size_change,
         )
         self.download_logo_size_scale.grid(
-            row=1, column=0, columnspan=2, sticky="ew", pady=(4, 0)
+            row=2, column=0, columnspan=2, sticky="ew", pady=(4, 0)
         )
 
         logo_opacity_row = tk.Frame(self.options_body, bg=self.palette["card"])
@@ -995,16 +1267,199 @@ class TranscriptApp:
             row=1, column=0, columnspan=2, sticky="ew", pady=(4, 0)
         )
 
+        self.download_lower_third_check = ttk.Checkbutton(
+            self.options_body,
+            text="Ajouter lower third",
+            variable=self.download_lower_third_enabled_var,
+            style="Card.TCheckbutton",
+        )
+        self.download_lower_third_check.grid(
+            row=16, column=0, sticky="w", pady=(10, 0)
+        )
+
+        self.download_lower_third_frame = tk.Frame(
+            self.options_body,
+            bg=self.palette["card"],
+        )
+        self.download_lower_third_frame.grid(row=17, column=0, sticky="ew", pady=(8, 0))
+        self.download_lower_third_frame.grid_columnconfigure(1, weight=1)
+        ttk.Label(
+            self.download_lower_third_frame,
+            text="Nom chaîne",
+            style="Card.TLabel",
+        ).grid(row=0, column=0, sticky="w")
+        self.download_lower_third_name_entry = ttk.Entry(
+            self.download_lower_third_frame,
+            textvariable=self.download_lower_third_name_var,
+            width=28,
+        )
+        self.download_lower_third_name_entry.grid(
+            row=0, column=1, sticky="ew", padx=(10, 0)
+        )
+        ttk.Label(
+            self.download_lower_third_frame,
+            text="Tagline",
+            style="Card.TLabel",
+        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.download_lower_third_tagline_entry = ttk.Entry(
+            self.download_lower_third_frame,
+            textvariable=self.download_lower_third_tagline_var,
+            width=28,
+        )
+        self.download_lower_third_tagline_entry.grid(
+            row=1, column=1, sticky="ew", padx=(10, 0), pady=(6, 0)
+        )
+        self.download_lower_third_subscribe_check = ttk.Checkbutton(
+            self.download_lower_third_frame,
+            text='Afficher "Abonnez-vous"',
+            variable=self.download_lower_third_subscribe_var,
+            style="Card.TCheckbutton",
+        )
+        self.download_lower_third_subscribe_check.grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=(6, 0)
+        )
+        lower_color_row = tk.Frame(self.download_lower_third_frame, bg=self.palette["card"])
+        lower_color_row.grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self.download_lower_third_bg_button = ttk.Button(
+            lower_color_row,
+            text="Couleur fond",
+            style="Subtle.TButton",
+            command=lambda: self._pick_lower_third_color(
+                self.download_lower_third_bg_color_var
+            ),
+        )
+        self.download_lower_third_bg_button.grid(row=0, column=0, sticky="w")
+        self.download_lower_third_bg_swatch = tk.Label(
+            lower_color_row,
+            width=3,
+            bg=self.download_lower_third_bg_color_var.get(),
+            relief="solid",
+            borderwidth=1,
+        )
+        self.download_lower_third_bg_swatch.grid(row=0, column=1, padx=(6, 12))
+        self.download_lower_third_accent_button = ttk.Button(
+            lower_color_row,
+            text="Couleur accent",
+            style="Subtle.TButton",
+            command=lambda: self._pick_lower_third_color(
+                self.download_lower_third_accent_color_var
+            ),
+        )
+        self.download_lower_third_accent_button.grid(row=0, column=2, sticky="w")
+        self.download_lower_third_accent_swatch = tk.Label(
+            lower_color_row,
+            width=3,
+            bg=self.download_lower_third_accent_color_var.get(),
+            relief="solid",
+            borderwidth=1,
+        )
+        self.download_lower_third_accent_swatch.grid(row=0, column=3, padx=(6, 0))
+
+        lower_timing_row = tk.Frame(
+            self.download_lower_third_frame,
+            bg=self.palette["card"],
+        )
+        lower_timing_row.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        lower_timing_row.grid_columnconfigure(0, weight=1)
+        ttk.Label(
+            lower_timing_row,
+            text="Intervalle",
+            style="Card.TLabel",
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            lower_timing_row,
+            textvariable=self.download_lower_third_interval_label_var,
+            style="CardMuted.TLabel",
+        ).grid(row=0, column=1, sticky="e")
+        self.download_lower_third_interval_scale = tk.Scale(
+            lower_timing_row,
+            from_=lower_third.MIN_DISPLAY_INTERVAL_SECONDS,
+            to=lower_third.MAX_DISPLAY_INTERVAL_SECONDS,
+            resolution=1,
+            orient="horizontal",
+            variable=self.download_lower_third_interval_var,
+            command=lambda _value: self._sync_lower_third_timing_labels(),
+            bg=self.palette["card"],
+            highlightthickness=0,
+        )
+        self.download_lower_third_interval_scale.grid(
+            row=1,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+        )
+        ttk.Label(
+            lower_timing_row,
+            text="Durée affichage",
+            style="Card.TLabel",
+        ).grid(row=2, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(
+            lower_timing_row,
+            textvariable=self.download_lower_third_display_duration_label_var,
+            style="CardMuted.TLabel",
+        ).grid(row=2, column=1, sticky="e", pady=(6, 0))
+        self.download_lower_third_display_duration_scale = tk.Scale(
+            lower_timing_row,
+            from_=lower_third.MIN_DISPLAY_DURATION_SECONDS,
+            to=lower_third.MAX_DISPLAY_DURATION_SECONDS,
+            resolution=1,
+            orient="horizontal",
+            variable=self.download_lower_third_display_duration_var,
+            command=lambda _value: self._sync_lower_third_timing_labels(),
+            bg=self.palette["card"],
+            highlightthickness=0,
+        )
+        self.download_lower_third_display_duration_scale.grid(
+            row=3,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+        )
+
+        value_add_row = tk.Frame(self.options_body, bg=self.palette["card"])
+        value_add_row.grid(row=18, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(
+            value_add_row,
+            text="Valeur ajoutée",
+            style="Card.TLabel",
+        ).grid(row=0, column=0, sticky="w", pady=(0, 4))
+        self.download_intro_outro_check = ttk.Checkbutton(
+            value_add_row,
+            text="Intro / Outro",
+            variable=self.download_intro_outro_enabled_var,
+            style="Card.TCheckbutton",
+        )
+        self.download_intro_outro_check.grid(row=1, column=0, sticky="w")
+        self.download_progress_bar_check = ttk.Checkbutton(
+            value_add_row,
+            text="Barre de progression",
+            variable=self.download_progress_bar_enabled_var,
+            style="Card.TCheckbutton",
+        )
+        self.download_progress_bar_check.grid(row=2, column=0, sticky="w", pady=(4, 0))
+        self.download_animated_watermark_check = ttk.Checkbutton(
+            value_add_row,
+            text="Filigrane animé",
+            variable=self.download_animated_watermark_enabled_var,
+            style="Card.TCheckbutton",
+        )
+        self.download_animated_watermark_check.grid(
+            row=3,
+            column=0,
+            sticky="w",
+            pady=(4, 0),
+        )
+
         self.download_subtitles_check = ttk.Checkbutton(
             self.options_body,
             text="Ajouter sous-titres",
             variable=self.download_subtitles_enabled_var,
             style="Card.TCheckbutton",
         )
-        self.download_subtitles_check.grid(row=16, column=0, sticky="w", pady=(10, 0))
+        self.download_subtitles_check.grid(row=19, column=0, sticky="w", pady=(10, 0))
 
         subtitle_style_row = tk.Frame(self.options_body, bg=self.palette["card"])
-        subtitle_style_row.grid(row=17, column=0, sticky="w", pady=(8, 0))
+        subtitle_style_row.grid(row=20, column=0, sticky="w", pady=(8, 0))
         ttk.Label(
             subtitle_style_row,
             text="Design sous-titres",
@@ -1022,7 +1477,7 @@ class TranscriptApp:
         )
 
         video_effect_row = tk.Frame(self.options_body, bg=self.palette["card"])
-        video_effect_row.grid(row=18, column=0, sticky="w", pady=(8, 0))
+        video_effect_row.grid(row=21, column=0, sticky="w", pady=(8, 0))
         ttk.Label(
             video_effect_row,
             text="Effet vidéo",
@@ -1039,11 +1494,14 @@ class TranscriptApp:
             row=0, column=1, sticky="w", padx=(10, 0)
         )
         self._update_download_logo_controls_state()
+        self._update_lower_third_controls_state()
+        self._redraw_logo_preview()
 
         self.options_body.grid_remove()
 
         cta_shadow = tk.Frame(container, bg=self.palette["shadow"])
-        cta_shadow.grid(row=3, column=0, sticky="ew", pady=(4, 12))
+        cta_shadow.grid(row=4, column=0, sticky="ew", pady=(4, 12))
+        cta_shadow.grid_columnconfigure(0, weight=1)
         cta_card = tk.Frame(cta_shadow, bg=self.palette["card"])
         cta_card.grid(row=0, column=0, sticky="ew", padx=1, pady=1)
         cta_card.grid_columnconfigure(0, weight=1)
@@ -1053,58 +1511,58 @@ class TranscriptApp:
             text="Transcription YouTube",
             style="CardMuted.TLabel",
         ).grid(row=0, column=0, sticky="n", pady=(14, 4))
-        self.generate_button = ttk.Button(
+        self.generate_button = self._button(
             cta_card,
             text="Transcrire la vidéo YouTube",
             command=self.generate,
-            style="Primary.TButton",
+            variant="primary",
         )
         self.generate_button.grid(
             row=1, column=0, sticky="ew", padx=160, pady=(0, 16), ipadx=30
         )
 
         actions = tk.Frame(container, bg=self.palette["bg"])
-        actions.grid(row=4, column=0, sticky="ew", pady=(0, 16))
+        actions.grid(row=5, column=0, sticky="ew", pady=(0, 16))
         actions.grid_columnconfigure(0, weight=1)
 
         actions_right = tk.Frame(actions, bg=self.palette["bg"])
         actions_right.grid(row=0, column=1, sticky="e")
 
-        self.save_button = ttk.Button(
+        self.save_button = self._button(
             actions_right,
             text="Enregistrer",
             command=self.save_transcript,
-            style="Subtle.TButton",
+            variant="tertiary",
         )
         self.save_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
 
-        self.download_moments_button = ttk.Button(
+        self.download_moments_button = self._button(
             actions_right,
             text="Exporter liste",
             command=self.export_moments,
-            style="Subtle.TButton",
+            variant="tertiary",
         )
         self.download_moments_button.grid(row=0, column=1, sticky="ew", padx=6)
 
-        self.clear_button = ttk.Button(
+        self.clear_button = self._button(
             actions_right,
             text="Réinitialiser",
             command=self.clear_form,
-            style="Subtle.TButton",
+            variant="tertiary",
         )
         self.clear_button.grid(row=0, column=2, sticky="ew", padx=6)
 
-        self.cancel_button = ttk.Button(
+        self.cancel_button = self._button(
             actions_right,
             text="Annuler",
             command=self.cancel,
             state="disabled",
-            style="Subtle.TButton",
+            variant="tertiary",
         )
         self.cancel_button.grid(row=0, column=3, sticky="ew", padx=(6, 0))
 
         transcript_shadow = tk.Frame(container, bg=self.palette["shadow"])
-        transcript_shadow.grid(row=5, column=0, sticky="nsew", pady=(0, 16))
+        transcript_shadow.grid(row=6, column=0, sticky="nsew", pady=(0, 16))
         transcript_shadow.grid_rowconfigure(0, weight=1)
         transcript_shadow.grid_columnconfigure(0, weight=1)
         transcript_card = tk.Frame(transcript_shadow, bg=self.palette["card"])
@@ -1119,11 +1577,11 @@ class TranscriptApp:
         ttk.Label(transcript_header, text="Transcription", style="CardTitle.TLabel").grid(
             row=0, column=0, sticky="w"
         )
-        self.copy_button = ttk.Button(
+        self.copy_button = self._button(
             transcript_header,
-            text="📋 Copier",
+            text="Copier",
             command=self.copy_to_clipboard,
-            style="Secondary.TButton",
+            variant="tertiary",
         )
         self.copy_button.grid(row=0, column=1, sticky="e")
 
@@ -1135,7 +1593,8 @@ class TranscriptApp:
         self._configure_transcript_tags()
 
         moments_shadow = tk.Frame(container, bg=self.palette["shadow"])
-        moments_shadow.grid(row=6, column=0, sticky="ew", pady=(0, 16))
+        moments_shadow.grid(row=7, column=0, sticky="ew", pady=(0, 16))
+        moments_shadow.grid_columnconfigure(0, weight=1)
         moments_card = tk.Frame(moments_shadow, bg=self.palette["card"])
         moments_card.grid(row=0, column=0, sticky="ew", padx=1, pady=1)
         moments_card.grid_columnconfigure(0, weight=1)
@@ -1158,11 +1617,11 @@ class TranscriptApp:
             moments_header, text="", style="CardMuted.TLabel"
         )
         self.moments_count_label.grid(row=0, column=1, sticky="e", padx=(0, 10))
-        self.download_clips_button = ttk.Button(
+        self.download_clips_button = self._button(
             moments_header,
-            text="⬇ Télécharger extraits",
+            text="Télécharger extraits",
             command=self.download_clips,
-            style="Secondary.TButton",
+            variant="secondary",
         )
         self.download_clips_button.grid(row=0, column=2, sticky="e")
 
@@ -1188,7 +1647,8 @@ class TranscriptApp:
         self._render_most_viewed_cards([])
 
         download_shadow = tk.Frame(container, bg=self.palette["shadow"])
-        download_shadow.grid(row=7, column=0, sticky="ew", pady=(0, 14))
+        download_shadow.grid(row=8, column=0, sticky="ew", pady=(0, 14))
+        download_shadow.grid_columnconfigure(0, weight=1)
         download_card = tk.Frame(download_shadow, bg=self.palette["card"])
         download_card.grid(row=0, column=0, sticky="ew", padx=1, pady=1)
         download_card.grid_columnconfigure(0, weight=1)
@@ -1197,42 +1657,34 @@ class TranscriptApp:
         download_header.grid_columnconfigure(0, weight=1)
 
         ttk.Label(
-            download_header, text="Téléchargements multi-réseaux", style="CardTitle.TLabel"
+            download_header,
+            text="Téléchargements multi-réseaux",
+            style="CardTitle.TLabel",
         ).grid(row=0, column=0, sticky="w")
-
-        download_header_right = tk.Frame(download_header, bg=self.palette["card"])
-        download_header_right.grid(row=0, column=1, sticky="e")
         ttk.Label(
-            download_header_right,
-            textvariable=self.download_summary_var,
+            download_header,
+            text="Vidéo entière, audio MP3 et historique des exports.",
             style="CardMuted.TLabel",
-        ).grid(row=0, column=0, sticky="e", padx=(0, 10))
-        self.download_toggle_button = ttk.Button(
-            download_header_right,
-            text="Voir les détails techniques",
-            command=self.toggle_download_logs,
-            style="Link.TButton",
-        )
-        self.download_toggle_button.grid(row=0, column=1, sticky="e")
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
 
         download_actions = tk.Frame(download_card, bg=self.palette["card"])
         download_actions.grid(row=1, column=0, columnspan=2, sticky="ew", padx=16, pady=(2, 8))
         download_actions.grid_columnconfigure(0, weight=1)
         download_actions.grid_columnconfigure(1, weight=1)
 
-        self.download_full_video_button = ttk.Button(
+        self.download_full_video_button = self._button(
             download_actions,
-            text="⬇ Télécharger la vidéo entière",
+            text="Télécharger la vidéo entière",
             command=self.download_full_video,
-            style="Secondary.TButton",
+            variant="secondary",
         )
         self.download_full_video_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
 
-        self.download_audio_button = ttk.Button(
+        self.download_audio_button = self._button(
             download_actions,
-            text="🎵 Télécharger l'audio (MP3)",
+            text="Télécharger l'audio (MP3)",
             command=self.download_audio_only,
-            style="Secondary.TButton",
+            variant="secondary",
         )
         self.download_audio_button.grid(row=0, column=1, sticky="ew", padx=(6, 0))
 
@@ -1247,47 +1699,8 @@ class TranscriptApp:
             row=1, column=0, columnspan=2, sticky="w", pady=(8, 0)
         )
 
-        self.download_overall_progress = ttk.Progressbar(
-            download_card,
-            mode="determinate",
-            maximum=1,
-            value=0,
-            style="Blue.Horizontal.TProgressbar",
-        )
-        self.download_overall_progress.grid(
-            row=2, column=0, columnspan=2, sticky="ew", padx=16, pady=(4, 4)
-        )
-
-        self.download_current_progress = ttk.Progressbar(
-            download_card,
-            mode="determinate",
-            maximum=100,
-            value=0,
-            style="Blue.Horizontal.TProgressbar",
-        )
-        self.download_current_progress.grid(
-            row=3, column=0, columnspan=2, sticky="ew", padx=16, pady=(0, 8)
-        )
-
-        ttk.Label(
-            download_card, textvariable=self.download_detail_var, style="CardMuted.TLabel"
-        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=16)
-        ttk.Label(
-            download_card, textvariable=self.download_phase_var, style="CardMuted.TLabel"
-        ).grid(row=5, column=0, columnspan=2, sticky="w", padx=16, pady=(4, 0))
-
-        self.download_log = scrolledtext.ScrolledText(
-            download_card, wrap=tk.WORD, height=5, font=(self.mono_family, 9)
-        )
-        self.download_log.grid(
-            row=6, column=0, columnspan=2, sticky="ew", padx=16, pady=(8, 16)
-        )
-        self.download_log.configure(state="disabled")
-        self._style_text_widget(self.download_log, background=self.palette["bg_alt"])
-        self.download_log.grid_remove()
-
         history_header = tk.Frame(download_card, bg=self.palette["card"])
-        history_header.grid(row=7, column=0, columnspan=2, sticky="ew", padx=16, pady=(0, 6))
+        history_header.grid(row=2, column=0, columnspan=2, sticky="ew", padx=16, pady=(6, 6))
         history_header.grid_columnconfigure(0, weight=1)
         ttk.Label(
             history_header,
@@ -1315,13 +1728,13 @@ class TranscriptApp:
             download_card, wrap=tk.WORD, height=8, font=(self.mono_family, 9)
         )
         self.download_history_text.grid(
-            row=8, column=0, columnspan=2, sticky="ew", padx=16, pady=(0, 16)
+            row=3, column=0, columnspan=2, sticky="ew", padx=16, pady=(0, 16)
         )
         self.download_history_text.configure(state="disabled")
         self._style_text_widget(self.download_history_text, background=self.palette["bg_alt"])
 
         feedback_frame = ttk.Frame(container)
-        feedback_frame.grid(row=8, column=0, sticky="ew", pady=(6, 0))
+        feedback_frame.grid(row=9, column=0, sticky="ew", pady=(6, 0))
         feedback_frame.grid_columnconfigure(0, weight=1)
         feedback_frame.grid_columnconfigure(1, weight=1)
 
@@ -1432,7 +1845,7 @@ class TranscriptApp:
                 badge_row,
                 text=f"  {timestamp}  ",
                 bg=self.palette["accent"],
-                fg="#ffffff",
+                fg=self.palette["white"],
                 font=(self.font_family, 10, "bold"),
                 pady=3,
             )
@@ -1443,7 +1856,7 @@ class TranscriptApp:
                     badge_row,
                     text="  ★ Recommandé  ",
                     bg=self.palette["success"],
-                    fg="#ffffff",
+                    fg=self.palette["white"],
                     font=(self.font_family, 9, "bold"),
                     pady=3,
                 ).grid(row=0, column=1, sticky="w", padx=(8, 0))
@@ -1599,7 +2012,7 @@ class TranscriptApp:
         )
         self.output_text.tag_configure(
             "bracket",
-            foreground="#7b8aa8",
+            foreground=self.palette["timestamp"],
             font=(self.mono_family, 10, "italic"),
         )
 
@@ -1646,9 +2059,9 @@ class TranscriptApp:
         video_title: str = "",
         shorts_mode: bool = False,
         has_logo: bool = False,
-        logo_position: str = "center",
+        logo_position: str = download_utils.DEFAULT_LOGO_POSITION,
         logo_size_mode: str = "relative",
-        logo_scale_percent: int = 58,
+        logo_scale_percent: int = download_utils.DEFAULT_LOGO_SCALE_PERCENT,
         logo_opacity_percent: int = 100,
         has_subtitles: bool = False,
         subtitle_style: str = "impact",
@@ -1667,13 +2080,11 @@ class TranscriptApp:
         if kind == "full_video":
             mode = ""
             if has_logo:
-                position_label = {"top": "haut", "center": "milieu", "bottom": "bas"}.get(
-                    logo_position, "milieu"
-                )
+                position_label = download_utils.logo_position_label(logo_position)
                 size_label = (
                     "taille originale"
                     if logo_size_mode == "original"
-                    else f"{logo_scale_percent}%"
+                    else f"{video_renderer.logo_frame_width_percent(logo_scale_percent)}% vidéo"
                 )
                 mode = f" | logo {size_label} {position_label} opacité {logo_opacity_percent}%"
             self.download_summary_var.set(
@@ -1696,13 +2107,11 @@ class TranscriptApp:
         else:
             mode_parts.append("normal 16:9")
         if has_logo:
-            position_label = {"top": "haut", "center": "milieu", "bottom": "bas"}.get(
-                logo_position, "milieu"
-            )
+            position_label = download_utils.logo_position_label(logo_position)
             size_label = (
                 "taille originale"
                 if logo_size_mode == "original"
-                else f"{logo_scale_percent}%"
+                else f"{video_renderer.logo_frame_width_percent(logo_scale_percent)}% vidéo"
             )
             mode_parts.append(f"logo {size_label} {position_label} opacité {logo_opacity_percent}%")
         if has_subtitles:
@@ -1788,6 +2197,32 @@ class TranscriptApp:
         if hasattr(self, "download_logo_size_var"):
             logo_scale_percent = self._get_download_logo_scale_percent()
 
+        logo_width_ratio = defaults["download_logo_width_ratio"]
+        if hasattr(self, "download_logo_width_ratio_var"):
+            logo_width_ratio = self._get_download_logo_width_ratio()
+        else:
+            logo_width_ratio = download_utils.logo_scale_percent_to_width_ratio(
+                logo_scale_percent
+            )
+
+        logo_x_ratio = defaults["download_logo_x_ratio"]
+        if hasattr(self, "download_logo_x_ratio_var"):
+            logo_x_ratio = self._get_download_logo_x_ratio()
+        else:
+            logo_x_ratio, _logo_y_ratio = download_utils.logo_position_to_ratios(
+                logo_position,
+                logo_width_ratio,
+            )
+
+        logo_y_ratio = defaults["download_logo_y_ratio"]
+        if hasattr(self, "download_logo_y_ratio_var"):
+            logo_y_ratio = self._get_download_logo_y_ratio()
+        else:
+            _logo_x_ratio, logo_y_ratio = download_utils.logo_position_to_ratios(
+                logo_position,
+                logo_width_ratio,
+            )
+
         logo_opacity_percent = defaults["download_logo_opacity_percent"]
         if hasattr(self, "download_logo_opacity_var"):
             logo_opacity_percent = self._get_download_logo_opacity_percent()
@@ -1811,6 +2246,47 @@ class TranscriptApp:
         ):
             video_effect = self._selected_download_video_effect()
 
+        intro_outro_enabled = defaults["download_intro_outro_enabled"]
+        if hasattr(self, "download_intro_outro_enabled_var"):
+            intro_outro_enabled = bool(self.download_intro_outro_enabled_var.get())
+        progress_bar_enabled = defaults["download_progress_bar_enabled"]
+        if hasattr(self, "download_progress_bar_enabled_var"):
+            progress_bar_enabled = bool(self.download_progress_bar_enabled_var.get())
+        animated_watermark_enabled = defaults["download_animated_watermark_enabled"]
+        if hasattr(self, "download_animated_watermark_enabled_var"):
+            animated_watermark_enabled = bool(
+                self.download_animated_watermark_enabled_var.get()
+            )
+
+        lower_third_enabled = defaults["download_lower_third_enabled"]
+        if hasattr(self, "download_lower_third_enabled_var"):
+            lower_third_enabled = bool(self.download_lower_third_enabled_var.get())
+        lower_third_name = defaults["download_lower_third_name"]
+        if hasattr(self, "download_lower_third_name_var"):
+            lower_third_name = self.download_lower_third_name_var.get()
+        lower_third_tagline = defaults["download_lower_third_tagline"]
+        if hasattr(self, "download_lower_third_tagline_var"):
+            lower_third_tagline = self.download_lower_third_tagline_var.get()
+        lower_third_subscribe = defaults["download_lower_third_subscribe"]
+        if hasattr(self, "download_lower_third_subscribe_var"):
+            lower_third_subscribe = bool(self.download_lower_third_subscribe_var.get())
+        lower_third_bg_color = defaults["download_lower_third_bg_color"]
+        if hasattr(self, "download_lower_third_bg_color_var"):
+            lower_third_bg_color = self.download_lower_third_bg_color_var.get()
+        lower_third_accent_color = defaults["download_lower_third_accent_color"]
+        if hasattr(self, "download_lower_third_accent_color_var"):
+            lower_third_accent_color = self.download_lower_third_accent_color_var.get()
+        lower_third_interval = defaults["download_lower_third_interval"]
+        if hasattr(self, "download_lower_third_interval_var"):
+            lower_third_interval = self._get_download_lower_third_interval()
+        lower_third_display_duration = defaults[
+            "download_lower_third_display_duration"
+        ]
+        if hasattr(self, "download_lower_third_display_duration_var"):
+            lower_third_display_duration = (
+                self._get_download_lower_third_display_duration()
+            )
+
         download_preset = defaults["download_preset"]
         if hasattr(self, "download_preset_var") and hasattr(
             self, "download_preset_lookup"
@@ -1828,9 +2304,23 @@ class TranscriptApp:
                 "download_logo_size_mode": logo_size_mode,
                 "download_logo_scale_percent": logo_scale_percent,
                 "download_logo_opacity_percent": logo_opacity_percent,
+                "download_logo_width_ratio": logo_width_ratio,
+                "download_logo_x_ratio": logo_x_ratio,
+                "download_logo_y_ratio": logo_y_ratio,
                 "download_subtitles_enabled": subtitles_enabled,
                 "download_subtitle_style": subtitle_style,
                 "download_video_effect": video_effect,
+                "download_intro_outro_enabled": intro_outro_enabled,
+                "download_progress_bar_enabled": progress_bar_enabled,
+                "download_animated_watermark_enabled": animated_watermark_enabled,
+                "download_lower_third_enabled": lower_third_enabled,
+                "download_lower_third_name": lower_third_name,
+                "download_lower_third_tagline": lower_third_tagline,
+                "download_lower_third_subscribe": lower_third_subscribe,
+                "download_lower_third_bg_color": lower_third_bg_color,
+                "download_lower_third_accent_color": lower_third_accent_color,
+                "download_lower_third_interval": lower_third_interval,
+                "download_lower_third_display_duration": lower_third_display_duration,
                 "download_preset": download_preset,
             }
         )
@@ -1859,14 +2349,19 @@ class TranscriptApp:
         )
         self.download_logo_var.set(str(snapshot.get("download_logo_path", "")))
 
-        selected_position = str(snapshot.get("download_logo_position", "center"))
+        selected_position = str(
+            snapshot.get(
+                "download_logo_position",
+                download_utils.DEFAULT_LOGO_POSITION,
+            )
+        )
         selected_position_label = next(
             (
                 label
                 for label, value in self.download_logo_position_lookup.items()
                 if value == selected_position
             ),
-            "Milieu",
+            "Haut droit",
         )
         self.download_logo_position_var.set(selected_position_label)
 
@@ -1877,13 +2372,44 @@ class TranscriptApp:
                 for label, value in self.download_logo_size_mode_lookup.items()
                 if value == selected_size_mode
             ),
-            "Personnalisée",
+            "Taille relative",
         )
         self.download_logo_size_mode_var.set(selected_size_mode_label)
 
-        logo_scale_percent = int(snapshot.get("download_logo_scale_percent", 58))
+        logo_width_ratio = download_utils.normalize_logo_width_ratio(
+            snapshot.get(
+                "download_logo_width_ratio",
+                download_utils.DEFAULT_LOGO_WIDTH_RATIO,
+            )
+        )
+        logo_scale_percent = download_utils.logo_width_ratio_to_scale_percent(
+            logo_width_ratio
+        )
         self.download_logo_size_var.set(logo_scale_percent)
-        self.download_logo_size_label_var.set(f"{logo_scale_percent}%")
+        self.download_logo_size_label_var.set(
+            self._download_logo_size_label(logo_scale_percent, selected_size_mode)
+        )
+        if hasattr(self, "download_logo_width_ratio_var"):
+            self.download_logo_width_ratio_var.set(logo_width_ratio)
+        if hasattr(self, "download_logo_x_ratio_var"):
+            self.download_logo_x_ratio_var.set(
+                download_utils.normalize_logo_x_ratio(
+                    snapshot.get(
+                        "download_logo_x_ratio",
+                        download_utils.DEFAULT_LOGO_X_RATIO,
+                    ),
+                    logo_width_ratio,
+                )
+            )
+        if hasattr(self, "download_logo_y_ratio_var"):
+            self.download_logo_y_ratio_var.set(
+                download_utils.normalize_logo_y_ratio(
+                    snapshot.get(
+                        "download_logo_y_ratio",
+                        download_utils.DEFAULT_LOGO_Y_RATIO,
+                    )
+                )
+            )
 
         logo_opacity_percent = int(snapshot.get("download_logo_opacity_percent", 100))
         self.download_logo_opacity_var.set(logo_opacity_percent)
@@ -1928,6 +2454,69 @@ class TranscriptApp:
         if hasattr(self, "download_video_effect_var"):
             self.download_video_effect_var.set(selected_effect_label)
 
+        if hasattr(self, "download_intro_outro_enabled_var"):
+            self.download_intro_outro_enabled_var.set(
+                bool(snapshot.get("download_intro_outro_enabled", False))
+            )
+        if hasattr(self, "download_progress_bar_enabled_var"):
+            self.download_progress_bar_enabled_var.set(
+                bool(snapshot.get("download_progress_bar_enabled", False))
+            )
+        if hasattr(self, "download_animated_watermark_enabled_var"):
+            self.download_animated_watermark_enabled_var.set(
+                bool(snapshot.get("download_animated_watermark_enabled", False))
+            )
+
+        if hasattr(self, "download_lower_third_enabled_var"):
+            self.download_lower_third_enabled_var.set(
+                bool(snapshot.get("download_lower_third_enabled", False))
+            )
+        if hasattr(self, "download_lower_third_name_var"):
+            self.download_lower_third_name_var.set(
+                str(snapshot.get("download_lower_third_name", ""))
+            )
+        if hasattr(self, "download_lower_third_tagline_var"):
+            self.download_lower_third_tagline_var.set(
+                str(snapshot.get("download_lower_third_tagline", ""))
+            )
+        if hasattr(self, "download_lower_third_subscribe_var"):
+            self.download_lower_third_subscribe_var.set(
+                bool(snapshot.get("download_lower_third_subscribe", True))
+            )
+        if hasattr(self, "download_lower_third_bg_color_var"):
+            self.download_lower_third_bg_color_var.set(
+                lower_third.normalize_hex_color(
+                    snapshot.get("download_lower_third_bg_color", ""),
+                    lower_third.DEFAULT_BG_COLOR,
+                )
+            )
+        if hasattr(self, "download_lower_third_accent_color_var"):
+            self.download_lower_third_accent_color_var.set(
+                lower_third.normalize_hex_color(
+                    snapshot.get("download_lower_third_accent_color", ""),
+                    lower_third.DEFAULT_ACCENT_COLOR,
+                )
+            )
+        if hasattr(self, "download_lower_third_interval_var"):
+            self.download_lower_third_interval_var.set(
+                int(
+                    snapshot.get(
+                        "download_lower_third_interval",
+                        lower_third.DEFAULT_DISPLAY_INTERVAL_SECONDS,
+                    )
+                )
+            )
+        if hasattr(self, "download_lower_third_display_duration_var"):
+            self.download_lower_third_display_duration_var.set(
+                int(
+                    snapshot.get(
+                        "download_lower_third_display_duration",
+                        lower_third.DEFAULT_DISPLAY_DURATION_SECONDS,
+                    )
+                )
+            )
+        self._sync_lower_third_timing_labels()
+
         selected_preset = str(snapshot.get("download_preset", "custom"))
         preset_lookup = getattr(
             self,
@@ -1945,8 +2534,51 @@ class TranscriptApp:
         if hasattr(self, "download_preset_var"):
             self.download_preset_var.set(selected_preset_label)
         self._update_download_logo_controls_state()
+        self._update_value_add_controls_state()
+        self._update_lower_third_controls_state()
+        self._redraw_logo_preview()
 
     def _on_download_preferences_change(self, *_: object) -> None:
+        self._redraw_logo_preview()
+        self._save_gui_settings()
+
+    def _on_value_add_change(self, *_: object) -> None:
+        self._update_value_add_controls_state()
+        self._update_download_logo_controls_state()
+        self._update_lower_third_controls_state()
+        self._save_gui_settings()
+
+    def _on_lower_third_change(self, *_: object) -> None:
+        self._update_lower_third_controls_state()
+        self._save_gui_settings()
+
+    def _on_lower_third_color_change(self, *_: object) -> None:
+        self._update_lower_third_controls_state()
+        self._save_gui_settings()
+
+    def _on_lower_third_timing_change(self, *_: object) -> None:
+        self._sync_lower_third_timing_labels()
+        self._save_gui_settings()
+
+    def _on_download_aspect_change(self, *_: object) -> None:
+        self._redraw_logo_preview()
+        self._save_gui_settings()
+
+    def _on_download_logo_position_change(self, *_: object) -> None:
+        if not hasattr(self, "download_logo_x_ratio_var") or not hasattr(
+            self,
+            "download_logo_y_ratio_var",
+        ):
+            self._save_gui_settings()
+            return
+        width_ratio = self._get_download_logo_width_ratio()
+        x_ratio, y_ratio = download_utils.logo_position_to_ratios(
+            self._selected_download_logo_position(),
+            width_ratio,
+        )
+        self.download_logo_x_ratio_var.set(x_ratio)
+        self.download_logo_y_ratio_var.set(y_ratio)
+        self._redraw_logo_preview()
         self._save_gui_settings()
 
     def _on_download_preset_change(self, *_: object) -> None:
@@ -1988,11 +2620,229 @@ class TranscriptApp:
         self._save_gui_settings()
 
     def _on_download_logo_size_mode_change(self, *_: object) -> None:
+        if hasattr(self, "download_logo_size_label_var"):
+            self.download_logo_size_label_var.set(
+                self._download_logo_size_label(
+                    self._get_download_logo_scale_percent(),
+                    self._selected_download_logo_size_mode(),
+                )
+            )
+        self._redraw_logo_preview()
         self._update_download_logo_controls_state()
         self._save_gui_settings()
 
     def _on_download_logo_focus_out(self, _event: tk.Event) -> None:
         self._save_gui_settings()
+
+    def _pick_lower_third_color(self, var: tk.StringVar) -> None:
+        color = colorchooser.askcolor(color=var.get())[1]
+        if color:
+            var.set(color)
+
+    def _download_lower_third_enabled(self) -> bool:
+        enabled_var = getattr(self, "download_lower_third_enabled_var", None)
+        return (
+            bool(enabled_var.get())
+            if enabled_var is not None and hasattr(enabled_var, "get")
+            else False
+        )
+
+    def _intro_outro_enabled(self) -> bool:
+        enabled_var = getattr(self, "download_intro_outro_enabled_var", None)
+        return (
+            bool(enabled_var.get())
+            if enabled_var is not None and hasattr(enabled_var, "get")
+            else False
+        )
+
+    def _progress_bar_enabled(self) -> bool:
+        enabled_var = getattr(self, "download_progress_bar_enabled_var", None)
+        return (
+            bool(enabled_var.get())
+            if enabled_var is not None and hasattr(enabled_var, "get")
+            else False
+        )
+
+    def _animated_watermark_enabled(self) -> bool:
+        enabled_var = getattr(self, "download_animated_watermark_enabled_var", None)
+        return (
+            bool(enabled_var.get())
+            if enabled_var is not None and hasattr(enabled_var, "get")
+            else False
+        )
+
+    def _update_value_add_controls_state(self) -> None:
+        state = "disabled" if getattr(self, "busy", False) else "normal"
+        for name in (
+            "download_intro_outro_check",
+            "download_progress_bar_check",
+            "download_animated_watermark_check",
+        ):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                widget.configure(state=state)
+
+    def _selected_value_add_options(self) -> dict | None:
+        intro_outro_enabled = self._intro_outro_enabled()
+        progress_bar_enabled = self._progress_bar_enabled()
+        animated_watermark_enabled = self._animated_watermark_enabled()
+        channel_name = (
+            self.download_lower_third_name_var.get()
+            if hasattr(self, "download_lower_third_name_var")
+            else ""
+        ).strip()
+        if intro_outro_enabled and not channel_name:
+            messagebox.showwarning(
+                "Intro / Outro incomplet",
+                "Renseigne le nom de la chaîne pour afficher l'intro/outro.",
+            )
+            return None
+
+        watermark_logo_path = ""
+        if animated_watermark_enabled:
+            watermark_logo_path = self._validated_download_logo_path()
+            if watermark_logo_path is None:
+                return None
+            if not watermark_logo_path:
+                messagebox.showwarning(
+                    "Filigrane incomplet",
+                    "Sélectionne un logo pour ajouter le filigrane animé.",
+                )
+                return None
+
+        return {
+            "intro_outro_enabled": intro_outro_enabled,
+            "intro_outro_channel_name": channel_name,
+            "progress_bar_enabled": progress_bar_enabled,
+            "animated_watermark_enabled": animated_watermark_enabled,
+            "watermark_logo_path": watermark_logo_path,
+        }
+
+    def _get_download_lower_third_interval(self) -> int:
+        var = getattr(self, "download_lower_third_interval_var", None)
+        try:
+            value = int(round(float(var.get()))) if var is not None else 0
+        except (TypeError, ValueError, tk.TclError):
+            value = lower_third.DEFAULT_DISPLAY_INTERVAL_SECONDS
+        return max(
+            lower_third.MIN_DISPLAY_INTERVAL_SECONDS,
+            min(lower_third.MAX_DISPLAY_INTERVAL_SECONDS, value),
+        )
+
+    def _get_download_lower_third_display_duration(self) -> int:
+        var = getattr(self, "download_lower_third_display_duration_var", None)
+        try:
+            value = int(round(float(var.get()))) if var is not None else 0
+        except (TypeError, ValueError, tk.TclError):
+            value = lower_third.DEFAULT_DISPLAY_DURATION_SECONDS
+        return max(
+            lower_third.MIN_DISPLAY_DURATION_SECONDS,
+            min(lower_third.MAX_DISPLAY_DURATION_SECONDS, value),
+        )
+
+    def _sync_lower_third_timing_labels(self) -> None:
+        if hasattr(self, "download_lower_third_interval_label_var"):
+            self.download_lower_third_interval_label_var.set(
+                f"{self._get_download_lower_third_interval()}s"
+            )
+        if hasattr(self, "download_lower_third_display_duration_label_var"):
+            self.download_lower_third_display_duration_label_var.set(
+                f"{self._get_download_lower_third_display_duration()}s"
+            )
+
+    def _update_lower_third_controls_state(self) -> None:
+        enabled = self._download_lower_third_enabled()
+        needs_channel_name = self._intro_outro_enabled()
+        visible = enabled or needs_channel_name
+        frame = getattr(self, "download_lower_third_frame", None)
+        if frame is not None:
+            if visible:
+                frame.grid()
+            else:
+                frame.grid_remove()
+
+        state = "normal" if visible and not getattr(self, "busy", False) else "disabled"
+        for name in (
+            "download_lower_third_name_entry",
+            "download_lower_third_tagline_entry",
+            "download_lower_third_subscribe_check",
+            "download_lower_third_bg_button",
+            "download_lower_third_accent_button",
+            "download_lower_third_interval_scale",
+            "download_lower_third_display_duration_scale",
+        ):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                widget.configure(state=state)
+
+        bg_swatch = getattr(self, "download_lower_third_bg_swatch", None)
+        if bg_swatch is not None and hasattr(self, "download_lower_third_bg_color_var"):
+            bg_swatch.configure(
+                bg=lower_third.normalize_hex_color(
+                    self.download_lower_third_bg_color_var.get(),
+                    lower_third.DEFAULT_BG_COLOR,
+                )
+            )
+        accent_swatch = getattr(self, "download_lower_third_accent_swatch", None)
+        if accent_swatch is not None and hasattr(
+            self,
+            "download_lower_third_accent_color_var",
+        ):
+            accent_swatch.configure(
+                bg=lower_third.normalize_hex_color(
+                    self.download_lower_third_accent_color_var.get(),
+                    lower_third.DEFAULT_ACCENT_COLOR,
+                )
+            )
+
+    def _selected_download_lower_third_config(
+        self,
+        *,
+        show_error: bool = True,
+    ) -> lower_third.LowerThirdConfig | None:
+        if not self._download_lower_third_enabled():
+            return None
+
+        name = (
+            self.download_lower_third_name_var.get()
+            if hasattr(self, "download_lower_third_name_var")
+            else ""
+        ).strip()
+        if not name:
+            if show_error:
+                messagebox.showwarning(
+                    "Lower third incomplet",
+                    "Renseigne le nom de la chaîne pour ajouter le lower third.",
+                )
+            return None
+
+        video_format = (
+            "9:16" if self._selected_download_aspect_mode() == "shorts" else "16:9"
+        )
+        return lower_third.config_from_hex(
+            channel_name=name,
+            tagline=(
+                self.download_lower_third_tagline_var.get()
+                if hasattr(self, "download_lower_third_tagline_var")
+                else ""
+            ),
+            bg_color=(
+                self.download_lower_third_bg_color_var.get()
+                if hasattr(self, "download_lower_third_bg_color_var")
+                else lower_third.DEFAULT_BG_COLOR
+            ),
+            accent_color=(
+                self.download_lower_third_accent_color_var.get()
+                if hasattr(self, "download_lower_third_accent_color_var")
+                else lower_third.DEFAULT_ACCENT_COLOR
+            ),
+            show_subscribe=(
+                bool(self.download_lower_third_subscribe_var.get())
+                if hasattr(self, "download_lower_third_subscribe_var")
+                else True
+            ),
+            video_format=video_format,
+        )
 
     @staticmethod
     def _empty_download_history() -> dict:
@@ -2438,27 +3288,26 @@ class TranscriptApp:
         duration = self._get_clip_duration()
         video_format = self._get_video_format()
         shorts_mode = self._selected_download_aspect_mode() == "shorts"
-        logo_enabled = self.download_logo_enabled_var.get()
-        logo_position = self._selected_download_logo_position()
+        logo_options = self._selected_download_logo_options()
+        if logo_options is None:
+            return
+        lower_third_config = self._selected_download_lower_third_config()
+        if self._download_lower_third_enabled() and lower_third_config is None:
+            return
+        value_add_options = self._selected_value_add_options()
+        if value_add_options is None:
+            return
+        lower_third_interval = self._get_download_lower_third_interval()
+        lower_third_display_duration = (
+            self._get_download_lower_third_display_duration()
+        )
         subtitles_enabled = (
             bool(self.download_subtitles_enabled_var.get())
             and bool(self.last_transcript_chunks)
+            and url == self.last_url
         )
         subtitle_style = self._selected_download_subtitle_style()
         video_effect = self._selected_download_video_effect()
-        logo_path = ""
-        if logo_enabled:
-            logo_path = self._validated_download_logo_path()
-            if logo_path is None:
-                return
-            if not logo_path:
-                messagebox.showwarning(
-                    "Logo manquant",
-                    "Sélectionne un logo ou décoche « Intégrer le logo ».",
-                )
-                return
-        logo_scale_percent = self._get_download_logo_scale_percent()
-        logo_opacity_percent = self._get_download_logo_opacity_percent()
         self._enqueue_downloads(
             self.last_most_viewed_moments,
             url,
@@ -2467,12 +3316,11 @@ class TranscriptApp:
             video_format,
             yt_dlp_cmd,
             shorts_mode=shorts_mode,
-            logo_enabled=logo_enabled,
-            logo_path=logo_path,
-            logo_position=logo_position,
-            logo_size_mode=self._selected_download_logo_size_mode(),
-            logo_scale_percent=logo_scale_percent,
-            logo_opacity_percent=logo_opacity_percent,
+            **logo_options,
+            **value_add_options,
+            lower_third_config=lower_third_config,
+            lower_third_interval=lower_third_interval,
+            lower_third_display_duration=lower_third_display_duration,
             subtitles_enabled=subtitles_enabled,
             subtitle_style=subtitle_style,
             video_effect=video_effect,
@@ -2510,27 +3358,26 @@ class TranscriptApp:
         duration = self._get_clip_duration()
         video_format = self._get_video_format()
         shorts_mode = self._selected_download_aspect_mode() == "shorts"
-        logo_enabled = self.download_logo_enabled_var.get()
-        logo_position = self._selected_download_logo_position()
+        logo_options = self._selected_download_logo_options()
+        if logo_options is None:
+            return
+        lower_third_config = self._selected_download_lower_third_config()
+        if self._download_lower_third_enabled() and lower_third_config is None:
+            return
+        value_add_options = self._selected_value_add_options()
+        if value_add_options is None:
+            return
+        lower_third_interval = self._get_download_lower_third_interval()
+        lower_third_display_duration = (
+            self._get_download_lower_third_display_duration()
+        )
         subtitles_enabled = (
             bool(self.download_subtitles_enabled_var.get())
             and bool(self.last_transcript_chunks)
+            and url == self.last_url
         )
         subtitle_style = self._selected_download_subtitle_style()
         video_effect = self._selected_download_video_effect()
-        logo_path = ""
-        if logo_enabled:
-            logo_path = self._validated_download_logo_path()
-            if logo_path is None:
-                return
-            if not logo_path:
-                messagebox.showwarning(
-                    "Logo manquant",
-                    "Sélectionne un logo ou décoche « Intégrer le logo ».",
-                )
-                return
-        logo_scale_percent = self._get_download_logo_scale_percent()
-        logo_opacity_percent = self._get_download_logo_opacity_percent()
         self._enqueue_downloads(
             [moment],
             url,
@@ -2539,12 +3386,11 @@ class TranscriptApp:
             video_format,
             yt_dlp_cmd,
             shorts_mode=shorts_mode,
-            logo_enabled=logo_enabled,
-            logo_path=logo_path,
-            logo_position=logo_position,
-            logo_size_mode=self._selected_download_logo_size_mode(),
-            logo_scale_percent=logo_scale_percent,
-            logo_opacity_percent=logo_opacity_percent,
+            **logo_options,
+            **value_add_options,
+            lower_third_config=lower_third_config,
+            lower_third_interval=lower_third_interval,
+            lower_third_display_duration=lower_third_display_duration,
             subtitles_enabled=subtitles_enabled,
             subtitle_style=subtitle_style,
             video_effect=video_effect,
@@ -2587,19 +3433,15 @@ class TranscriptApp:
             )
             return
 
-        logo_enabled = self.download_logo_enabled_var.get()
-        logo_position = self._selected_download_logo_position()
-        logo_path = ""
-        if logo_enabled:
-            logo_path = self._validated_download_logo_path()
-            if logo_path is None:
-                return
-            if not logo_path:
-                messagebox.showwarning(
-                    "Logo manquant",
-                    "Sélectionne un logo ou décoche « Intégrer le logo ».",
-                )
-                return
+        logo_options = self._selected_download_logo_options()
+        if logo_options is None:
+            return
+        lower_third_config = self._selected_download_lower_third_config()
+        if self._download_lower_third_enabled() and lower_third_config is None:
+            return
+        value_add_options = self._selected_value_add_options()
+        if value_add_options is None:
+            return
 
         start = int(moment.minute_index * 60)
         duration = min(8, self._get_clip_duration())
@@ -2607,6 +3449,7 @@ class TranscriptApp:
         subtitles_enabled = (
             bool(self.download_subtitles_enabled_var.get())
             and bool(self.last_transcript_chunks)
+            and url == self.last_url
         )
         item = {
             "url": url,
@@ -2616,15 +3459,16 @@ class TranscriptApp:
             "format": self._get_video_format(),
             "yt_dlp_cmd": yt_dlp_cmd,
             "shorts": self._selected_download_aspect_mode() == "shorts",
-            "logo_enabled": logo_enabled,
-            "logo_path": logo_path,
-            "logo_position": logo_position,
-            "logo_size_mode": self._selected_download_logo_size_mode(),
-            "logo_scale_percent": self._get_download_logo_scale_percent(),
-            "logo_opacity_percent": self._get_download_logo_opacity_percent(),
+            **logo_options,
+            **value_add_options,
+            "lower_third_config": lower_third_config,
+            "lower_third_interval": self._get_download_lower_third_interval(),
+            "lower_third_display_duration": (
+                self._get_download_lower_third_display_duration()
+            ),
             "subtitles_enabled": subtitles_enabled,
             "subtitle_style": self._selected_download_subtitle_style(),
-            "subtitle_chunks": list(self.last_transcript_chunks)
+            "subtitle_chunks": copy.deepcopy(self.last_transcript_chunks)
             if subtitles_enabled
             else [],
             "video_effect": self._selected_download_video_effect(),
@@ -2664,6 +3508,42 @@ class TranscriptApp:
             return
         self.master.after(0, self._finish_preview_ui, True, "", final_path)
 
+    @staticmethod
+    def _logo_ratio_options_from_item(item: dict) -> dict:
+        scale_percent = item.get(
+            "logo_scale_percent",
+            download_utils.DEFAULT_LOGO_SCALE_PERCENT,
+        )
+        width_source = item.get("logo_width_ratio")
+        logo_width_ratio = (
+            download_utils.normalize_logo_width_ratio(width_source)
+            if width_source is not None
+            else download_utils.logo_scale_percent_to_width_ratio(scale_percent)
+        )
+        x_source = item.get("logo_x_ratio")
+        y_source = item.get("logo_y_ratio")
+        if x_source is None or y_source is None:
+            logo_x_ratio, logo_y_ratio = download_utils.logo_position_to_ratios(
+                item.get("logo_position", download_utils.DEFAULT_LOGO_POSITION),
+                logo_width_ratio,
+            )
+        else:
+            logo_x_ratio = download_utils.normalize_logo_x_ratio(
+                x_source,
+                logo_width_ratio,
+            )
+            logo_y_ratio = download_utils.normalize_logo_y_ratio(y_source)
+        options = {
+            "logo_width_ratio": logo_width_ratio,
+            "logo_x_ratio": logo_x_ratio,
+            "logo_y_ratio": logo_y_ratio,
+        }
+        if item.get("logo_original_width") is not None:
+            options["logo_original_width"] = item.get("logo_original_width")
+        if item.get("logo_original_height") is not None:
+            options["logo_original_height"] = item.get("logo_original_height")
+        return options
+
     def _render_preview_clip(self, item: dict) -> Path:
         start = int(item["start"])
         duration = int(item["duration"])
@@ -2685,10 +3565,7 @@ class TranscriptApp:
             "--no-playlist",
             "--download-sections",
             f"*{start_ts}-{end_ts}",
-            "-S",
-            f"ext:{video_format}",
-            "--merge-output-format",
-            video_format,
+            *download_utils.build_best_video_download_args(video_format),
             "--paths",
             str(output_dir),
             "-o",
@@ -2745,10 +3622,41 @@ class TranscriptApp:
             "logo_path": item.get("logo_path", "")
             if item.get("logo_enabled")
             else "",
-            "logo_position": str(item.get("logo_position", "center")),
+            "logo_position": str(
+                item.get("logo_position", download_utils.DEFAULT_LOGO_POSITION)
+            ),
             "logo_size_mode": str(item.get("logo_size_mode", "relative")),
-            "logo_scale_percent": int(item.get("logo_scale_percent", 58)),
+            "logo_scale_percent": int(
+                item.get(
+                    "logo_scale_percent",
+                    download_utils.DEFAULT_LOGO_SCALE_PERCENT,
+                )
+            ),
             "logo_opacity_percent": int(item.get("logo_opacity_percent", 100)),
+            "lower_third_config": item.get("lower_third_config"),
+            "clip_duration": float(item.get("duration", 0) or 0),
+            "intro_outro_enabled": bool(item.get("intro_outro_enabled", False)),
+            "intro_outro_channel_name": str(
+                item.get("intro_outro_channel_name", "")
+            ),
+            "progress_bar_enabled": bool(item.get("progress_bar_enabled", False)),
+            "animated_watermark_enabled": bool(
+                item.get("animated_watermark_enabled", False)
+            ),
+            "watermark_logo_path": str(item.get("watermark_logo_path", "")),
+            "lower_third_interval": int(
+                item.get(
+                    "lower_third_interval",
+                    lower_third.DEFAULT_DISPLAY_INTERVAL_SECONDS,
+                )
+            ),
+            "lower_third_display_duration": int(
+                item.get(
+                    "lower_third_display_duration",
+                    lower_third.DEFAULT_DISPLAY_DURATION_SECONDS,
+                )
+            ),
+            **self._logo_ratio_options_from_item(item),
         }
         if item.get("subtitles_enabled"):
             variant_kwargs.update(
@@ -2762,7 +3670,7 @@ class TranscriptApp:
         video_effect = str(item.get("video_effect", "none"))
         if video_effect != "none":
             variant_kwargs["video_effect"] = video_effect
-        variant_kwargs["preview_width"] = 540
+        variant_kwargs["preview_width"] = 1080
         return self._build_download_variant(downloaded_path, **variant_kwargs)
 
     def _finish_preview_ui(
@@ -2825,19 +3733,48 @@ class TranscriptApp:
         logo_options = {
             "logo_enabled": False,
             "logo_path": "",
-            "logo_position": "center",
+            "logo_position": download_utils.DEFAULT_LOGO_POSITION,
             "logo_size_mode": "relative",
-            "logo_scale_percent": 58,
+            "logo_scale_percent": download_utils.DEFAULT_LOGO_SCALE_PERCENT,
             "logo_opacity_percent": 100,
+            "logo_width_ratio": download_utils.DEFAULT_LOGO_WIDTH_RATIO,
+            "logo_x_ratio": download_utils.DEFAULT_LOGO_X_RATIO,
+            "logo_y_ratio": download_utils.DEFAULT_LOGO_Y_RATIO,
+            "logo_original_width": None,
+            "logo_original_height": None,
         }
         creative_options = {
             "subtitles_enabled": False,
             "subtitle_style": "impact",
             "video_effect": "none",
+            "lower_third_config": None,
+            "lower_third_interval": lower_third.DEFAULT_DISPLAY_INTERVAL_SECONDS,
+            "lower_third_display_duration": lower_third.DEFAULT_DISPLAY_DURATION_SECONDS,
+            "intro_outro_enabled": False,
+            "intro_outro_channel_name": "",
+            "progress_bar_enabled": False,
+            "animated_watermark_enabled": False,
+            "watermark_logo_path": "",
+            "shorts_mode": False,
         }
         if not audio_only:
+            shorts_mode = (
+                self._selected_download_aspect_mode() == "shorts"
+                if hasattr(self, "download_aspect_ratio_var")
+                and hasattr(self, "download_aspect_ratio_lookup")
+                else False
+            )
             logo_options = self._selected_full_video_logo_options()
             if logo_options is None:
+                return
+            lower_third_config = self._selected_download_lower_third_config()
+            if (
+                self._download_lower_third_enabled()
+                and lower_third_config is None
+            ):
+                return
+            value_add_options = self._selected_value_add_options()
+            if value_add_options is None:
                 return
             subtitle_enabled_var = getattr(self, "download_subtitles_enabled_var", None)
             subtitles_enabled = (
@@ -2866,17 +3803,29 @@ class TranscriptApp:
                 ),
                 "subtitle_style": subtitle_style,
                 "video_effect": video_effect,
+                "lower_third_config": lower_third_config,
+                "lower_third_interval": self._get_download_lower_third_interval(),
+                "lower_third_display_duration": (
+                    self._get_download_lower_third_display_duration()
+                ),
+                "shorts_mode": shorts_mode,
+                **value_add_options,
             }
             needs_processing = (
-                bool(logo_options.get("logo_enabled") and logo_options.get("logo_path"))
+                bool(shorts_mode)
+                or bool(logo_options.get("logo_enabled") and logo_options.get("logo_path"))
                 or bool(creative_options["subtitles_enabled"])
+                or creative_options["lower_third_config"] is not None
+                or bool(creative_options["intro_outro_enabled"])
+                or bool(creative_options["progress_bar_enabled"])
+                or bool(creative_options["animated_watermark_enabled"])
                 or creative_options["video_effect"] != "none"
             )
             if needs_processing and self._resolve_system_tool("ffmpeg") is None:
                 messagebox.showerror(
                     "Dépendance manquante",
-                    "Le binaire 'ffmpeg' est requis pour intégrer un logo, "
-                    "des sous-titres ou un effet vidéo.\n"
+                    "Le binaire 'ffmpeg' est requis pour convertir le format, intégrer un logo, "
+                    "un lower third, des sous-titres ou un effet vidéo.\n"
                     "macOS: brew install ffmpeg\n"
                     "Windows: winget install Gyan.FFmpeg\n"
                     "Linux: sudo apt install ffmpeg",
@@ -2950,6 +3899,7 @@ class TranscriptApp:
         if not file_path:
             return
         self._set_entry_text(self.download_logo_entry, file_path)
+        self._redraw_logo_preview()
         self._save_gui_settings()
 
     def _validated_download_logo_path(self) -> str | None:
@@ -2965,6 +3915,79 @@ class TranscriptApp:
             return None
         return str(logo_path)
 
+    def _build_logo_config(self) -> LogoConfig | None:
+        enabled_var = getattr(self, "download_logo_enabled_var", None)
+        enabled = (
+            bool(enabled_var.get())
+            if enabled_var is not None and hasattr(enabled_var, "get")
+            else False
+        )
+        if not enabled:
+            return None
+
+        logo_path = self._current_download_logo_path()
+        if not logo_path:
+            messagebox.showwarning(
+                "Logo manquant",
+                "Sélectionne un logo ou décoche « Intégrer le logo ».",
+            )
+            return None
+
+        try:
+            return LogoConfig.from_gui_state(
+                {
+                    "logo_path": logo_path,
+                    "logo_position": self._selected_download_logo_position(),
+                    "logo_size_mode": self._selected_download_logo_size_mode(),
+                    "logo_size": self._get_download_logo_scale_percent(),
+                    "logo_opacity": self._get_download_logo_opacity_percent(),
+                    "download_logo_x_ratio": self._get_download_logo_x_ratio(),
+                    "download_logo_y_ratio": self._get_download_logo_y_ratio(),
+                }
+            )
+        except (FileNotFoundError, ValueError) as error:
+            messagebox.showerror("Configuration logo invalide", str(error))
+            return None
+
+    def _logo_options_from_config(self, config: LogoConfig) -> dict:
+        return {
+            "logo_enabled": True,
+            "logo_path": str(config.path),
+            "logo_position": download_utils.normalize_logo_position(config.position),
+            "logo_size_mode": config.size_mode,
+            "logo_scale_percent": int(round(config.slider_value)),
+            "logo_opacity_percent": int(round(config.opacity * 100)),
+            "logo_width_ratio": self._get_download_logo_width_ratio(),
+            "logo_x_ratio": self._get_download_logo_x_ratio(),
+            "logo_y_ratio": self._get_download_logo_y_ratio(),
+            "logo_original_width": config.original_width,
+            "logo_original_height": config.original_height,
+        }
+
+    def _selected_download_logo_options(self) -> dict | None:
+        enabled_var = getattr(self, "download_logo_enabled_var", None)
+        logo_enabled = (
+            bool(enabled_var.get())
+            if enabled_var is not None and hasattr(enabled_var, "get")
+            else False
+        )
+        if logo_enabled:
+            config = self._build_logo_config()
+            return self._logo_options_from_config(config) if config is not None else None
+        return {
+            "logo_enabled": False,
+            "logo_path": "",
+            "logo_position": self._selected_download_logo_position(),
+            "logo_size_mode": self._selected_download_logo_size_mode(),
+            "logo_scale_percent": self._get_download_logo_scale_percent(),
+            "logo_opacity_percent": self._get_download_logo_opacity_percent(),
+            "logo_width_ratio": self._get_download_logo_width_ratio(),
+            "logo_x_ratio": self._get_download_logo_x_ratio(),
+            "logo_y_ratio": self._get_download_logo_y_ratio(),
+            "logo_original_width": None,
+            "logo_original_height": None,
+        }
+
     def _selected_full_video_logo_options(self) -> dict | None:
         logo_enabled_var = getattr(self, "download_logo_enabled_var", None)
         logo_enabled = (
@@ -2972,57 +3995,35 @@ class TranscriptApp:
             if logo_enabled_var is not None and hasattr(logo_enabled_var, "get")
             else False
         )
-        logo_path = ""
-        logo_position = "center"
-        if hasattr(self, "download_logo_position_var") and hasattr(
-            self, "download_logo_position_lookup"
-        ):
-            logo_position = self._selected_download_logo_position()
-        logo_scale_percent = (
-            self._get_download_logo_scale_percent()
-            if hasattr(self, "download_logo_size_var")
-            else 58
-        )
-        logo_opacity_percent = (
-            self._get_download_logo_opacity_percent()
-            if hasattr(self, "download_logo_opacity_var")
-            else 100
-        )
-        logo_size_mode = (
-            self._selected_download_logo_size_mode()
-            if hasattr(self, "download_logo_size_mode_var")
-            and hasattr(self, "download_logo_size_mode_lookup")
-            else "relative"
-        )
+        if not logo_enabled:
+            return {
+                "logo_enabled": False,
+                "logo_path": "",
+                "logo_position": download_utils.DEFAULT_LOGO_POSITION,
+                "logo_size_mode": "relative",
+                "logo_scale_percent": download_utils.DEFAULT_LOGO_SCALE_PERCENT,
+                "logo_opacity_percent": 100,
+                "logo_width_ratio": download_utils.DEFAULT_LOGO_WIDTH_RATIO,
+                "logo_x_ratio": download_utils.DEFAULT_LOGO_X_RATIO,
+                "logo_y_ratio": download_utils.DEFAULT_LOGO_Y_RATIO,
+                "logo_original_width": None,
+                "logo_original_height": None,
+            }
 
-        if logo_enabled:
-            logo_path = self._validated_download_logo_path()
-            if logo_path is None:
-                return None
-            if not logo_path:
-                messagebox.showwarning(
-                    "Logo manquant",
-                    "Sélectionne un logo ou décoche « Ajouter le logo à la vidéo ».",
-                )
-                return None
-            if self._resolve_system_tool("ffmpeg") is None:
-                messagebox.showerror(
-                    "Dépendance manquante",
-                    "Le binaire 'ffmpeg' est requis pour intégrer un logo à la vidéo.\n"
-                    "macOS: brew install ffmpeg\n"
-                    "Windows: winget install Gyan.FFmpeg\n"
-                    "Linux: sudo apt install ffmpeg",
-                )
-                return None
+        logo_config = self._build_logo_config()
+        if logo_config is None:
+            return None
+        if self._resolve_system_tool("ffmpeg") is None:
+            messagebox.showerror(
+                "Dépendance manquante",
+                "Le binaire 'ffmpeg' est requis pour intégrer un logo à la vidéo.\n"
+                "macOS: brew install ffmpeg\n"
+                "Windows: winget install Gyan.FFmpeg\n"
+                "Linux: sudo apt install ffmpeg",
+            )
+            return None
 
-        return {
-            "logo_enabled": logo_enabled,
-            "logo_path": logo_path,
-            "logo_position": logo_position,
-            "logo_size_mode": logo_size_mode,
-            "logo_scale_percent": logo_scale_percent,
-            "logo_opacity_percent": logo_opacity_percent,
-        }
+        return self._logo_options_from_config(logo_config)
 
     def _on_download_logo_toggle(self) -> None:
         self._update_download_logo_controls_state()
@@ -3032,30 +4033,37 @@ class TranscriptApp:
         if enabled_var is None:
             return
         enabled = enabled_var.get()
+        needs_logo_path = enabled or self._animated_watermark_enabled()
         if getattr(self, "busy", False):
             state = "disabled"
         else:
-            state = "normal" if enabled else "disabled"
-        combo_state = "readonly" if state != "disabled" else "disabled"
-        logo_size_mode = (
-            self._selected_download_logo_size_mode()
-            if hasattr(self, "download_logo_size_mode_var")
-            and hasattr(self, "download_logo_size_mode_lookup")
-            else "relative"
+            state = "normal" if needs_logo_path else "disabled"
+        scale_state = "normal" if enabled and state != "disabled" else "disabled"
+        fixed_logo_state = "normal" if enabled and state != "disabled" else "disabled"
+        fixed_logo_combo_state = (
+            "readonly" if fixed_logo_state != "disabled" else "disabled"
         )
-        size_state = state if logo_size_mode == "relative" else "disabled"
+        if (
+            fixed_logo_state != "disabled"
+            and self._selected_download_logo_size_mode() == "original"
+        ):
+            scale_state = "disabled"
         widgets = (
             ("download_logo_entry", state),
             ("download_logo_button", state),
-            ("download_logo_position_combo", combo_state),
-            ("download_logo_size_mode_combo", combo_state),
-            ("download_logo_size_scale", size_state),
-            ("download_logo_opacity_scale", state),
+            ("download_logo_position_combo", fixed_logo_combo_state),
+            ("download_logo_size_mode_combo", fixed_logo_combo_state),
+            ("download_logo_size_scale", scale_state),
+            ("download_logo_opacity_scale", fixed_logo_state),
         )
         for name, widget_state in widgets:
             widget = getattr(self, name, None)
             if widget is not None:
                 widget.configure(state=widget_state)
+        preview_canvas = getattr(self, "download_logo_preview_canvas", None)
+        if preview_canvas is not None:
+            preview_canvas.configure(cursor="hand2" if fixed_logo_state != "disabled" else "")
+        self._redraw_logo_preview()
 
     def _on_logo_size_change(self, value: str) -> None:
         try:
@@ -3063,20 +4071,89 @@ class TranscriptApp:
         except (TypeError, ValueError):
             percent = self._get_download_logo_scale_percent()
         percent = max(20, min(80, percent))
+        previous_width_ratio = self._get_download_logo_width_ratio()
+        previous_x_ratio = self._get_download_logo_x_ratio()
+        previous_y_ratio = self._get_download_logo_y_ratio()
+        selected_position = (
+            self._selected_download_logo_position()
+            if hasattr(self, "download_logo_position_var")
+            and hasattr(self, "download_logo_position_lookup")
+            else download_utils.DEFAULT_LOGO_POSITION
+        )
         self.download_logo_size_var.set(percent)
-        self.download_logo_size_label_var.set(f"{percent}%")
+        self.download_logo_size_label_var.set(
+            self._download_logo_size_label(percent, self._selected_download_logo_size_mode())
+        )
+        if hasattr(self, "download_logo_width_ratio_var"):
+            new_width_ratio = download_utils.logo_scale_percent_to_width_ratio(percent)
+            self.download_logo_width_ratio_var.set(new_width_ratio)
+            if (
+                hasattr(self, "download_logo_x_ratio_var")
+                and hasattr(self, "download_logo_y_ratio_var")
+                and download_utils.logo_ratios_match_position(
+                    selected_position,
+                    previous_width_ratio,
+                    previous_x_ratio,
+                    previous_y_ratio,
+                )
+            ):
+                logo_x_ratio, logo_y_ratio = download_utils.logo_position_to_ratios(
+                    selected_position,
+                    new_width_ratio,
+                )
+                self.download_logo_x_ratio_var.set(logo_x_ratio)
+                self.download_logo_y_ratio_var.set(logo_y_ratio)
+        self._redraw_logo_preview()
+
+    @staticmethod
+    def _download_logo_size_label(percent: int, mode: str = "relative") -> str:
+        if mode == "original":
+            return "Original · max 30% vidéo"
+        video_percent = video_renderer.logo_frame_width_percent(percent)
+        return f"{percent}% · {video_percent}% vidéo"
 
     def _get_download_logo_scale_percent(self) -> int:
         try:
             value = int(round(float(self.download_logo_size_var.get())))
-        except (TypeError, ValueError):
-            return 58
+        except (AttributeError, TypeError, ValueError):
+            return download_utils.DEFAULT_LOGO_SCALE_PERCENT
         return max(20, min(80, value))
 
+    def _get_download_logo_width_ratio(self) -> float:
+        value = (
+            self.download_logo_width_ratio_var.get()
+            if hasattr(self, "download_logo_width_ratio_var")
+            else download_utils.logo_scale_percent_to_width_ratio(
+                self._get_download_logo_scale_percent()
+            )
+        )
+        return download_utils.normalize_logo_width_ratio(value)
+
+    def _get_download_logo_x_ratio(self) -> float:
+        value = (
+            self.download_logo_x_ratio_var.get()
+            if hasattr(self, "download_logo_x_ratio_var")
+            else download_utils.DEFAULT_LOGO_X_RATIO
+        )
+        return download_utils.normalize_logo_x_ratio(
+            value,
+            self._get_download_logo_width_ratio(),
+        )
+
+    def _get_download_logo_y_ratio(self) -> float:
+        value = (
+            self.download_logo_y_ratio_var.get()
+            if hasattr(self, "download_logo_y_ratio_var")
+            else download_utils.DEFAULT_LOGO_Y_RATIO
+        )
+        return download_utils.normalize_logo_y_ratio(value)
+
     def _selected_download_logo_size_mode(self) -> str:
-        label = self.download_logo_size_mode_var.get()
-        mode = self.download_logo_size_mode_lookup.get(label, "relative")
-        return mode if mode in {"original", "relative"} else "relative"
+        var = getattr(self, "download_logo_size_mode_var", None)
+        lookup = getattr(self, "download_logo_size_mode_lookup", {})
+        label = var.get() if var is not None and hasattr(var, "get") else ""
+        value = lookup.get(label, "relative")
+        return value if value in {"relative", "original"} else "relative"
 
     def _on_logo_opacity_change(self, value: str) -> None:
         try:
@@ -3096,7 +4173,226 @@ class TranscriptApp:
 
     def _selected_download_logo_position(self) -> str:
         label = self.download_logo_position_var.get()
-        return self.download_logo_position_lookup.get(label, "center")
+        return download_utils.normalize_logo_position(
+            self.download_logo_position_lookup.get(
+                label,
+                download_utils.DEFAULT_LOGO_POSITION,
+            )
+        )
+
+    def _logo_preview_canvas_size(self) -> tuple[int, int]:
+        aspect_mode = (
+            self._selected_download_aspect_mode()
+            if hasattr(self, "download_aspect_ratio_var")
+            and hasattr(self, "download_aspect_ratio_lookup")
+            else "landscape"
+        )
+        if aspect_mode == "shorts":
+            return 158, 280
+        return 280, 158
+
+    def _logo_preview_source_size(self) -> tuple[int, int] | None:
+        logo_path = self._current_download_logo_path()
+        if not logo_path:
+            return None
+        path = Path(logo_path).expanduser()
+        if not path.exists() or not path.is_file():
+            return None
+        try:
+            with Image.open(path) as image:
+                return image.size
+        except Exception:
+            return None
+
+    def _logo_preview_width_ratio(self, portrait_preview: bool) -> float:
+        mode = self._selected_download_logo_size_mode()
+        source_size = self._logo_preview_source_size()
+        if mode == "original" and source_size is not None:
+            target_width = 1080 if portrait_preview else 1920
+            video_format = "9:16" if portrait_preview else "16:9"
+            logo_width_px = video_renderer.compute_logo_width(
+                mode,
+                self._get_download_logo_scale_percent(),
+                target_width,
+                video_format,
+                original_logo_width=source_size[0],
+            )
+            return max(0.01, min(0.30, logo_width_px / target_width))
+        base_width_ratio = self._get_download_logo_width_ratio()
+        return download_utils.effective_logo_width_ratio(
+            base_width_ratio,
+            portrait=portrait_preview,
+        )
+
+    def _logo_preview_bounds(self, width: int, height: int) -> tuple[int, int, int, int]:
+        portrait_preview = height > width
+        width_ratio = self._logo_preview_width_ratio(portrait_preview)
+        base_width_ratio = self._get_download_logo_width_ratio()
+        x_ratio = self._get_download_logo_x_ratio()
+        y_ratio = self._get_download_logo_y_ratio()
+        selected_position = (
+            self._selected_download_logo_position()
+            if hasattr(self, "download_logo_position_var")
+            and hasattr(self, "download_logo_position_lookup")
+            else download_utils.DEFAULT_LOGO_POSITION
+        )
+        source_size = self._logo_preview_source_size()
+        aspect_ratio = (
+            source_size[1] / source_size[0]
+            if source_size is not None and source_size[0]
+            else 0.36
+        )
+        logo_width = max(14, int(width * width_ratio))
+        logo_height = max(12, int(logo_width * aspect_ratio))
+        if download_utils.logo_ratios_match_position(
+            selected_position,
+            base_width_ratio,
+            x_ratio,
+            y_ratio,
+        ):
+            x, y = video_renderer.resolve_logo_position(
+                selected_position,
+                0.0,
+                0.0,
+                width,
+                height,
+                logo_width,
+                logo_height,
+            )
+        else:
+            x_ratio = download_utils.normalize_logo_x_ratio(x_ratio, width_ratio)
+            y_ratio = download_utils.normalize_logo_y_ratio(y_ratio)
+            x, y = video_renderer.resolve_logo_position(
+                "custom",
+                x_ratio,
+                y_ratio,
+                width,
+                height,
+                logo_width,
+                logo_height,
+            )
+        return x, y, logo_width, logo_height
+
+    def _redraw_logo_preview(self) -> None:
+        canvas = getattr(self, "download_logo_preview_canvas", None)
+        if canvas is None:
+            return
+        width, height = self._logo_preview_canvas_size()
+        try:
+            canvas.configure(width=width, height=height)
+            canvas.delete("all")
+        except tk.TclError:
+            return
+
+        enabled_var = getattr(self, "download_logo_enabled_var", None)
+        enabled = (
+            bool(enabled_var.get())
+            if enabled_var is not None and hasattr(enabled_var, "get")
+            else True
+        )
+        frame_fill = self.palette["bg_alt"]
+        border = self.palette["shadow"]
+        canvas.create_rectangle(
+            1,
+            1,
+            width - 2,
+            height - 2,
+            fill=frame_fill,
+            outline=border,
+        )
+        for fraction in (1 / 3, 2 / 3):
+            x = int(width * fraction)
+            y = int(height * fraction)
+            canvas.create_line(x, 2, x, height - 2, fill=self.palette["canvas_grid"])
+            canvas.create_line(2, y, width - 2, y, fill=self.palette["canvas_grid"])
+
+        logo_path = self._current_download_logo_path()
+        logo_x, logo_y, logo_width, logo_height = self._logo_preview_bounds(
+            width,
+            height,
+        )
+        if not logo_path or not Path(logo_path).expanduser().exists():
+            canvas.create_text(
+                width // 2,
+                height // 2,
+                text="Aucun logo chargé",
+                fill=self.palette["muted"],
+                font=(self.font_family, 9),
+            )
+            return
+
+        try:
+            image = Image.open(Path(logo_path).expanduser()).convert("RGBA")
+            resized = image.resize(
+                (max(1, logo_width), max(1, logo_height)),
+                Image.Resampling.LANCZOS,
+            )
+            opacity = self._get_download_logo_opacity_percent() / 100.0
+            if not enabled:
+                opacity *= 0.35
+            red, green, blue, alpha = resized.split()
+            alpha = alpha.point(lambda value: int(value * opacity))
+            resized.putalpha(alpha)
+            self._logo_preview_tk = ImageTk.PhotoImage(resized)
+            canvas.create_image(
+                logo_x,
+                logo_y,
+                anchor="nw",
+                image=self._logo_preview_tk,
+                tags=("logo",),
+            )
+        except Image.DecompressionBombError:
+            canvas.create_text(
+                width // 2,
+                height // 2,
+                text="Logo trop grand pour l'aperçu",
+                fill=self.palette["danger"],
+                font=(self.font_family, 8),
+            )
+        except Exception as error:
+            canvas.create_text(
+                width // 2,
+                height // 2,
+                text=f"Erreur chargement logo : {error}",
+                fill=self.palette["danger"],
+                font=(self.font_family, 8),
+            )
+
+    def _draw_logo_preview(self) -> None:
+        self._redraw_logo_preview()
+
+    def _on_logo_preview_press(self, event: tk.Event) -> None:
+        if not bool(self.download_logo_enabled_var.get()) or getattr(self, "busy", False):
+            return
+        width, height = self._logo_preview_canvas_size()
+        logo_x, logo_y, logo_width, logo_height = self._logo_preview_bounds(
+            width,
+            height,
+        )
+        if logo_x <= event.x <= logo_x + logo_width and logo_y <= event.y <= logo_y + logo_height:
+            self._logo_preview_drag_offset = (event.x - logo_x, event.y - logo_y)
+        else:
+            self._logo_preview_drag_offset = (logo_width // 2, logo_height // 2)
+            self._on_logo_preview_drag(event)
+
+    def _on_logo_preview_drag(self, event: tk.Event) -> None:
+        if not bool(self.download_logo_enabled_var.get()) or getattr(self, "busy", False):
+            return
+        width, height = self._logo_preview_canvas_size()
+        _logo_x, _logo_y, logo_width, logo_height = self._logo_preview_bounds(
+            width,
+            height,
+        )
+        offset_x, offset_y = getattr(
+            self,
+            "_logo_preview_drag_offset",
+            (logo_width // 2, logo_height // 2),
+        )
+        x = max(0, min(width - logo_width, int(event.x - offset_x)))
+        y = max(0, min(height - logo_height, int(event.y - offset_y)))
+        self.download_logo_x_ratio_var.set(x / width)
+        self.download_logo_y_ratio_var.set(y / height)
+        self._redraw_logo_preview()
 
     def _selected_download_subtitle_style(self) -> str:
         label = self.download_subtitle_style_var.get()
@@ -3138,13 +4434,27 @@ class TranscriptApp:
         logo_size_mode: str,
         logo_scale_percent: int,
         logo_opacity_percent: int,
+        logo_width_ratio: float = download_utils.DEFAULT_LOGO_WIDTH_RATIO,
+        logo_x_ratio: float = download_utils.DEFAULT_LOGO_X_RATIO,
+        logo_y_ratio: float = download_utils.DEFAULT_LOGO_Y_RATIO,
+        logo_original_width: int | None = None,
+        logo_original_height: int | None = None,
+        lower_third_config: lower_third.LowerThirdConfig | None = None,
+        lower_third_interval: int = lower_third.DEFAULT_DISPLAY_INTERVAL_SECONDS,
+        lower_third_display_duration: int = lower_third.DEFAULT_DISPLAY_DURATION_SECONDS,
+        intro_outro_enabled: bool = False,
+        intro_outro_channel_name: str = "",
+        progress_bar_enabled: bool = False,
+        animated_watermark_enabled: bool = False,
+        watermark_logo_path: str = "",
         subtitles_enabled: bool = False,
         subtitle_style: str = "impact",
         video_effect: str = "none",
     ) -> None:
+        subtitles_allowed = subtitles_enabled and url == getattr(self, "last_url", "")
         transcript_chunks = (
-            list(getattr(self, "last_transcript_chunks", []))
-            if subtitles_enabled
+            copy.deepcopy(getattr(self, "last_transcript_chunks", []))
+            if subtitles_allowed
             else []
         )
         for moment in moments:
@@ -3169,6 +4479,19 @@ class TranscriptApp:
                     "logo_size_mode": logo_size_mode,
                     "logo_scale_percent": logo_scale_percent,
                     "logo_opacity_percent": logo_opacity_percent,
+                    "logo_width_ratio": logo_width_ratio,
+                    "logo_x_ratio": logo_x_ratio,
+                    "logo_y_ratio": logo_y_ratio,
+                    "logo_original_width": logo_original_width,
+                    "logo_original_height": logo_original_height,
+                    "lower_third_config": copy.deepcopy(lower_third_config),
+                    "lower_third_interval": lower_third_interval,
+                    "lower_third_display_duration": lower_third_display_duration,
+                    "intro_outro_enabled": intro_outro_enabled,
+                    "intro_outro_channel_name": intro_outro_channel_name,
+                    "progress_bar_enabled": progress_bar_enabled,
+                    "animated_watermark_enabled": animated_watermark_enabled,
+                    "watermark_logo_path": watermark_logo_path,
                     "subtitles_enabled": bool(transcript_chunks),
                     "subtitle_style": subtitle_style,
                     "subtitle_chunks": transcript_chunks,
@@ -3211,21 +4534,51 @@ class TranscriptApp:
         kind: str,
         logo_enabled: bool = False,
         logo_path: str = "",
-        logo_position: str = "center",
+        logo_position: str = download_utils.DEFAULT_LOGO_POSITION,
         logo_size_mode: str = "relative",
-        logo_scale_percent: int = 58,
+        logo_scale_percent: int = download_utils.DEFAULT_LOGO_SCALE_PERCENT,
         logo_opacity_percent: int = 100,
+        logo_width_ratio: float = download_utils.DEFAULT_LOGO_WIDTH_RATIO,
+        logo_x_ratio: float = download_utils.DEFAULT_LOGO_X_RATIO,
+        logo_y_ratio: float = download_utils.DEFAULT_LOGO_Y_RATIO,
+        logo_original_width: int | None = None,
+        logo_original_height: int | None = None,
+        lower_third_config: lower_third.LowerThirdConfig | None = None,
+        lower_third_interval: int = lower_third.DEFAULT_DISPLAY_INTERVAL_SECONDS,
+        lower_third_display_duration: int = lower_third.DEFAULT_DISPLAY_DURATION_SECONDS,
+        intro_outro_enabled: bool = False,
+        intro_outro_channel_name: str = "",
+        progress_bar_enabled: bool = False,
+        animated_watermark_enabled: bool = False,
+        watermark_logo_path: str = "",
         subtitles_enabled: bool = False,
         subtitle_style: str = "impact",
         video_effect: str = "none",
+        shorts_mode: bool = False,
     ) -> None:
         normalized_kind = kind if kind in {"full_video", "audio"} else "full_video"
         item_format = "mp3" if normalized_kind == "audio" else video_format
+        media_shorts_mode = normalized_kind == "full_video" and bool(shorts_mode)
         media_logo_enabled = normalized_kind == "full_video" and logo_enabled and bool(logo_path)
+        media_lower_third_config = (
+            copy.deepcopy(lower_third_config)
+            if normalized_kind == "full_video"
+            else None
+        )
+        media_intro_outro_enabled = (
+            normalized_kind == "full_video" and bool(intro_outro_enabled)
+        )
+        media_progress_bar_enabled = (
+            normalized_kind == "full_video" and bool(progress_bar_enabled)
+        )
+        media_animated_watermark_enabled = (
+            normalized_kind == "full_video" and bool(animated_watermark_enabled)
+        )
         media_subtitles_enabled = (
             normalized_kind == "full_video"
             and subtitles_enabled
             and bool(getattr(self, "last_transcript_chunks", []))
+            and url == getattr(self, "last_url", "")
         )
         title_cache = getattr(self, "video_title_cache", {})
         cached_title = ""
@@ -3241,16 +4594,35 @@ class TranscriptApp:
                 "duration": 0,
                 "format": item_format,
                 "yt_dlp_cmd": yt_dlp_cmd,
-                "shorts": False,
+                "shorts": media_shorts_mode,
                 "logo_enabled": media_logo_enabled,
                 "logo_path": logo_path if media_logo_enabled else "",
                 "logo_position": logo_position,
                 "logo_size_mode": logo_size_mode,
                 "logo_scale_percent": logo_scale_percent,
                 "logo_opacity_percent": logo_opacity_percent,
+                "logo_width_ratio": logo_width_ratio,
+                "logo_x_ratio": logo_x_ratio,
+                "logo_y_ratio": logo_y_ratio,
+                "logo_original_width": logo_original_width if media_logo_enabled else None,
+                "logo_original_height": logo_original_height if media_logo_enabled else None,
+                "lower_third_config": media_lower_third_config,
+                "lower_third_interval": lower_third_interval,
+                "lower_third_display_duration": lower_third_display_duration,
+                "intro_outro_enabled": media_intro_outro_enabled,
+                "intro_outro_channel_name": intro_outro_channel_name
+                if media_intro_outro_enabled
+                else "",
+                "progress_bar_enabled": media_progress_bar_enabled,
+                "animated_watermark_enabled": media_animated_watermark_enabled,
+                "watermark_logo_path": watermark_logo_path
+                if media_animated_watermark_enabled
+                else "",
                 "subtitles_enabled": media_subtitles_enabled,
                 "subtitle_style": subtitle_style,
-                "subtitle_chunks": list(getattr(self, "last_transcript_chunks", []))
+                "subtitle_chunks": copy.deepcopy(
+                    getattr(self, "last_transcript_chunks", [])
+                )
                 if media_subtitles_enabled
                 else [],
                 "video_effect": video_effect if normalized_kind == "full_video" else "none",
@@ -3310,9 +4682,15 @@ class TranscriptApp:
                     item.get("video_title", ""),
                     bool(item.get("shorts")),
                     bool(item.get("logo_enabled") and item.get("logo_path")),
-                    item.get("logo_position", "center"),
+                    item.get(
+                        "logo_position",
+                        download_utils.DEFAULT_LOGO_POSITION,
+                    ),
                     item.get("logo_size_mode", "relative"),
-                    item.get("logo_scale_percent", 58),
+                    item.get(
+                        "logo_scale_percent",
+                        download_utils.DEFAULT_LOGO_SCALE_PERCENT,
+                    ),
                     item.get("logo_opacity_percent", 100),
                     bool(item.get("subtitles_enabled") and item.get("subtitle_chunks")),
                     item.get("subtitle_style", "impact"),
@@ -3460,18 +4838,51 @@ class TranscriptApp:
             return True, ""
 
         final_path = downloaded_path
-        item["shorts"] = False
         if media_kind == "full_video":
             try:
                 variant_kwargs = {
-                    "to_shorts": False,
+                    "to_shorts": bool(item.get("shorts", False)),
                     "logo_path": item.get("logo_path", "")
                     if item.get("logo_enabled")
                     else "",
-                    "logo_position": str(item.get("logo_position", "center")),
+                    "logo_position": str(
+                        item.get("logo_position", download_utils.DEFAULT_LOGO_POSITION)
+                    ),
                     "logo_size_mode": str(item.get("logo_size_mode", "relative")),
-                    "logo_scale_percent": int(item.get("logo_scale_percent", 58)),
+                    "logo_scale_percent": int(
+                        item.get(
+                            "logo_scale_percent",
+                            download_utils.DEFAULT_LOGO_SCALE_PERCENT,
+                        )
+                    ),
                     "logo_opacity_percent": int(item.get("logo_opacity_percent", 100)),
+                    "lower_third_config": item.get("lower_third_config"),
+                    "intro_outro_enabled": bool(
+                        item.get("intro_outro_enabled", False)
+                    ),
+                    "intro_outro_channel_name": str(
+                        item.get("intro_outro_channel_name", "")
+                    ),
+                    "progress_bar_enabled": bool(
+                        item.get("progress_bar_enabled", False)
+                    ),
+                    "animated_watermark_enabled": bool(
+                        item.get("animated_watermark_enabled", False)
+                    ),
+                    "watermark_logo_path": str(item.get("watermark_logo_path", "")),
+                    "lower_third_interval": int(
+                        item.get(
+                            "lower_third_interval",
+                            lower_third.DEFAULT_DISPLAY_INTERVAL_SECONDS,
+                        )
+                    ),
+                    "lower_third_display_duration": int(
+                        item.get(
+                            "lower_third_display_duration",
+                            lower_third.DEFAULT_DISPLAY_DURATION_SECONDS,
+                        )
+                    ),
+                    **self._logo_ratio_options_from_item(item),
                 }
                 if item.get("subtitles_enabled"):
                     variant_kwargs.update(
@@ -3489,6 +4900,7 @@ class TranscriptApp:
             except RuntimeError as error:
                 return False, str(error)
         else:
+            item["shorts"] = False
             item["logo_enabled"] = False
             item["logo_path"] = ""
             item["subtitles_enabled"] = False
@@ -3535,10 +4947,7 @@ class TranscriptApp:
             "--no-playlist",
             "--download-sections",
             f"*{start_ts}-{end_ts}",
-            "-S",
-            f"ext:{video_format}",
-            "--merge-output-format",
-            video_format,
+            *download_utils.build_best_video_download_args(video_format),
             "--paths",
             item["output_dir"],
             "-o",
@@ -3639,10 +5048,41 @@ class TranscriptApp:
                 "logo_path": item.get("logo_path", "")
                 if item.get("logo_enabled")
                 else "",
-                "logo_position": str(item.get("logo_position", "center")),
+                "logo_position": str(
+                    item.get("logo_position", download_utils.DEFAULT_LOGO_POSITION)
+                ),
                 "logo_size_mode": str(item.get("logo_size_mode", "relative")),
-                "logo_scale_percent": int(item.get("logo_scale_percent", 58)),
+                "logo_scale_percent": int(
+                    item.get(
+                        "logo_scale_percent",
+                        download_utils.DEFAULT_LOGO_SCALE_PERCENT,
+                    )
+                ),
                 "logo_opacity_percent": int(item.get("logo_opacity_percent", 100)),
+                "lower_third_config": item.get("lower_third_config"),
+                "clip_duration": float(item.get("duration", 0) or 0),
+                "intro_outro_enabled": bool(item.get("intro_outro_enabled", False)),
+                "intro_outro_channel_name": str(
+                    item.get("intro_outro_channel_name", "")
+                ),
+                "progress_bar_enabled": bool(item.get("progress_bar_enabled", False)),
+                "animated_watermark_enabled": bool(
+                    item.get("animated_watermark_enabled", False)
+                ),
+                "watermark_logo_path": str(item.get("watermark_logo_path", "")),
+                "lower_third_interval": int(
+                    item.get(
+                        "lower_third_interval",
+                        lower_third.DEFAULT_DISPLAY_INTERVAL_SECONDS,
+                    )
+                ),
+                "lower_third_display_duration": int(
+                    item.get(
+                        "lower_third_display_duration",
+                        lower_third.DEFAULT_DISPLAY_DURATION_SECONDS,
+                    )
+                ),
+                **self._logo_ratio_options_from_item(item),
             }
             if item.get("subtitles_enabled"):
                 variant_kwargs.update(
@@ -3690,6 +5130,10 @@ class TranscriptApp:
         to_shorts: bool,
         has_logo: bool,
         has_subtitles: bool = False,
+        has_lower_third: bool = False,
+        has_intro_outro: bool = False,
+        has_progress_bar: bool = False,
+        has_watermark: bool = False,
         video_effect: str = "none",
         subtitle_style: str = "impact",
     ) -> str:
@@ -3697,6 +5141,10 @@ class TranscriptApp:
             to_shorts,
             has_logo,
             has_subtitles=has_subtitles,
+            has_lower_third=has_lower_third,
+            has_intro_outro=has_intro_outro,
+            has_progress_bar=has_progress_bar,
+            has_watermark=has_watermark,
             video_effect=video_effect,
             subtitle_style=subtitle_style,
         )
@@ -3708,6 +5156,10 @@ class TranscriptApp:
         to_shorts: bool,
         has_logo: bool,
         has_subtitles: bool = False,
+        has_lower_third: bool = False,
+        has_intro_outro: bool = False,
+        has_progress_bar: bool = False,
+        has_watermark: bool = False,
         video_effect: str = "none",
         subtitle_style: str = "impact",
     ) -> Path:
@@ -3716,6 +5168,10 @@ class TranscriptApp:
             to_shorts,
             has_logo,
             has_subtitles=has_subtitles,
+            has_lower_third=has_lower_third,
+            has_intro_outro=has_intro_outro,
+            has_progress_bar=has_progress_bar,
+            has_watermark=has_watermark,
             video_effect=video_effect,
             subtitle_style=subtitle_style,
         )
@@ -3741,6 +5197,13 @@ class TranscriptApp:
             if path.is_file()
         ]
         if not candidates:
+            candidates = [
+                path
+                for path in output_dir.iterdir()
+                if path.is_file()
+                and path.suffix.lower() in download_utils.COMMON_VIDEO_EXTENSIONS
+            ]
+        if not candidates:
             return None
         new_files = [
             path for path in candidates if str(path.resolve()) not in existing_files
@@ -3754,15 +5217,29 @@ class TranscriptApp:
         *,
         to_shorts: bool,
         logo_path: str,
-        logo_position: str = "center",
+        logo_position: str = download_utils.DEFAULT_LOGO_POSITION,
         logo_size_mode: str = "relative",
-        logo_scale_percent: int = 58,
+        logo_scale_percent: int = download_utils.DEFAULT_LOGO_SCALE_PERCENT,
         logo_opacity_percent: int = 100,
+        logo_width_ratio: float | None = None,
+        logo_x_ratio: float | None = None,
+        logo_y_ratio: float | None = None,
+        logo_original_width: int | None = None,
+        logo_original_height: int | None = None,
         subtitle_chunks: List[dict] | None = None,
         subtitle_start: float = 0.0,
         subtitle_duration: float | None = None,
+        clip_duration: float | None = None,
+        lower_third_interval: float = lower_third.DEFAULT_DISPLAY_INTERVAL_SECONDS,
+        lower_third_display_duration: float = lower_third.DEFAULT_DISPLAY_DURATION_SECONDS,
+        intro_outro_enabled: bool = False,
+        intro_outro_channel_name: str = "",
+        progress_bar_enabled: bool = False,
+        animated_watermark_enabled: bool = False,
+        watermark_logo_path: str = "",
         subtitle_style: str = "impact",
         video_effect: str = "none",
+        lower_third_config: lower_third.LowerThirdConfig | None = None,
         preview_width: int | None = None,
     ) -> Path:
         ffmpeg_path = self._resolve_system_tool("ffmpeg")
@@ -3779,14 +5256,32 @@ class TranscriptApp:
             logo_size_mode=logo_size_mode,
             logo_scale_percent=logo_scale_percent,
             logo_opacity_percent=logo_opacity_percent,
+            logo_width_ratio=logo_width_ratio,
+            logo_x_ratio=logo_x_ratio,
+            logo_y_ratio=logo_y_ratio,
+            logo_original_width=logo_original_width,
+            logo_original_height=logo_original_height,
             subtitle_chunks=subtitle_chunks,
             subtitle_start=subtitle_start,
             subtitle_duration=subtitle_duration,
+            clip_duration=clip_duration,
+            lower_third_interval=lower_third_interval,
+            lower_third_display_duration=lower_third_display_duration,
+            intro_outro_enabled=intro_outro_enabled,
+            intro_outro_channel_name=intro_outro_channel_name,
+            progress_bar_enabled=progress_bar_enabled,
+            animated_watermark_enabled=animated_watermark_enabled,
+            watermark_logo_path=watermark_logo_path,
             subtitle_style=subtitle_style,
             video_effect=video_effect,
+            lower_third_config=lower_third_config,
             preview_width=preview_width,
         )
         return video_renderer.render_video_variant(options, runner=subprocess.run)
+
+    @staticmethod
+    def _logo_overlay_x_expr(position: str, margin: int = 36) -> str:
+        return download_utils.logo_overlay_x_expr(position, margin)
 
     @staticmethod
     def _logo_overlay_y_expr(position: str, margin: int = 36) -> str:
@@ -3914,7 +5409,7 @@ class TranscriptApp:
             self._set_busy_state(False)
             self.progress.stop()
         if error:
-            self.style.configure("Status.TLabel", foreground="#b91c1c")
+            self.style.configure("Status.TLabel", foreground=self.palette["status_error"])
         elif success:
             self.style.configure("Status.TLabel", foreground=self.palette["success"])
         else:
@@ -4069,6 +5564,17 @@ class TranscriptApp:
             "download_logo_size_scale",
             "download_logo_opacity_scale",
             "download_logo_position_combo",
+            "download_intro_outro_check",
+            "download_progress_bar_check",
+            "download_animated_watermark_check",
+            "download_lower_third_check",
+            "download_lower_third_name_entry",
+            "download_lower_third_tagline_entry",
+            "download_lower_third_subscribe_check",
+            "download_lower_third_bg_button",
+            "download_lower_third_accent_button",
+            "download_lower_third_interval_scale",
+            "download_lower_third_display_duration_scale",
             "download_subtitles_check",
             "download_subtitle_style_combo",
             "download_video_effect_combo",
@@ -4087,7 +5593,9 @@ class TranscriptApp:
         cancel_button = getattr(self, "cancel_button", None)
         if cancel_button is not None:
             cancel_button.configure(state="normal" if busy else "disabled")
+        self._update_value_add_controls_state()
         self._update_download_logo_controls_state()
+        self._update_lower_third_controls_state()
         if not busy:
             self._update_generate_state()
 
