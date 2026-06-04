@@ -612,9 +612,14 @@ def test_download_media_item_generates_logo_variant_for_full_video(monkeypatch, 
             "logo_size_mode": "original",
             "logo_scale_percent": 55,
             "logo_opacity_percent": 80,
+            "logo_display_duration": None,
+            "shorts_blur_bg": True,
             "lower_third_config": None,
             "intro_outro_enabled": False,
             "intro_outro_channel_name": "",
+            "intro_outro_hold_duration": 1.5,
+            "intro_outro_bg_color": "0x000000@0.75",
+            "intro_outro_text_color": "#FFFFFF",
             "progress_bar_enabled": False,
             "animated_watermark_enabled": False,
             "watermark_logo_path": "",
@@ -742,6 +747,8 @@ def test_render_preview_clip_generates_temporary_variant(monkeypatch, tmp_path) 
             "logo_size_mode": "relative",
             "logo_scale_percent": 58,
             "logo_opacity_percent": 100,
+            "logo_display_duration": None,
+            "shorts_blur_bg": True,
             "logo_width_ratio": 0.176,
             "logo_x_ratio": 0.5,
             "logo_y_ratio": 0.46,
@@ -750,12 +757,16 @@ def test_render_preview_clip_generates_temporary_variant(monkeypatch, tmp_path) 
             ],
             "subtitle_start": 60.0,
             "subtitle_duration": 8.0,
+            "subtitle_offset_ms": 0,
             "subtitle_style": "impact",
             "video_effect": "black_white",
             "lower_third_config": None,
             "clip_duration": 8.0,
             "intro_outro_enabled": False,
             "intro_outro_channel_name": "",
+            "intro_outro_hold_duration": 1.5,
+            "intro_outro_bg_color": "0x000000@0.75",
+            "intro_outro_text_color": "#FFFFFF",
             "progress_bar_enabled": False,
             "animated_watermark_enabled": False,
             "watermark_logo_path": "",
@@ -783,6 +794,7 @@ def test_load_gui_settings_returns_default_when_missing(tmp_path) -> None:
         "download_logo_size_mode": "relative",
         "download_logo_scale_percent": 30,
         "download_logo_opacity_percent": 100,
+        "download_logo_duration": 0,
         "download_logo_width_ratio": 0.12,
         "download_logo_x_ratio": 0.95,
         "download_logo_y_ratio": 0.05,
@@ -988,6 +1000,7 @@ def test_save_gui_settings_writes_download_preferences(tmp_path) -> None:
         "download_logo_size_mode": "relative",
         "download_logo_scale_percent": 63,
         "download_logo_opacity_percent": 82,
+        "download_logo_duration": 0,
         "download_logo_width_ratio": 0.186,
         "download_logo_x_ratio": 0.5,
         "download_logo_y_ratio": 0.46,
@@ -1184,7 +1197,7 @@ def test_build_download_variant_caps_original_logo_size(monkeypatch, tmp_path) -
     assert "scale2ref" not in filter_complex
     assert "scale=576:-1" in filter_complex
     assert "overlay=1248:54" in filter_complex
-    assert "[0:v][logo]overlay" in filter_complex
+    assert "[with_shadow][logo_fg]overlay" in filter_complex
 
 
 def test_build_download_variant_scales_logo_from_video_frame(monkeypatch, tmp_path) -> None:
@@ -1212,13 +1225,15 @@ def test_build_download_variant_scales_logo_from_video_frame(monkeypatch, tmp_pa
     filter_complex = commands[0][commands[0].index("-filter_complex") + 1]
     assert "scale=192:-1" in filter_complex
     assert "overlay=1632:54" in filter_complex
-    assert "[0:v][logo]overlay" in filter_complex
+    assert "[with_shadow][logo_fg]overlay" in filter_complex
 
 
-def test_build_download_variant_uses_probed_size_for_logo_ratios(
+def test_build_download_variant_preserves_source_resolution(
     monkeypatch,
     tmp_path,
 ) -> None:
+    # Forced upscale is disabled (MIN_FULL_HD_SHORT_EDGE=0): video keeps its
+    # original resolution instead of being stretched to 1920x1080.
     app = gui.TranscriptApp.__new__(gui.TranscriptApp)
     app._resolve_system_tool = lambda name: "/usr/bin/ffmpeg" if name == "ffmpeg" else None  # type: ignore[attr-defined]
     input_path = tmp_path / "clip.mp4"
@@ -1251,8 +1266,48 @@ def test_build_download_variant_uses_probed_size_for_logo_ratios(
     )
 
     filter_complex = commands[0][commands[0].index("-filter_complex") + 1]
+    # No forced upscale to 1920x1080 — source resolution (1280x720) is kept
+    assert "scale=1920:1080" not in filter_complex
+    assert "unsharp=5:5:0.45:5:5:0.0" in filter_complex
+    # Logo scaled for 1280px-wide frame: int(1280 * 0.12) = 153px
     assert "scale=153:-1" in filter_complex
-    assert "overlay=1063:36" in filter_complex
+    assert filter_complex.index("unsharp=") < filter_complex.index("[logo_fg]")
+
+
+def test_build_download_variant_does_not_upscale_full_hd_source(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    app = gui.TranscriptApp.__new__(gui.TranscriptApp)
+    app._resolve_system_tool = lambda name: "/usr/bin/ffmpeg" if name == "ffmpeg" else None  # type: ignore[attr-defined]
+    input_path = tmp_path / "clip.mp4"
+    input_path.write_text("video", encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def _capture_run(cmd, **_kwargs):
+        commands.append(cmd)
+
+    def _fake_probe(cmd, **_kwargs):
+        return gui.subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout='{"streams":[{"width":1920,"height":1080}]}',
+        )
+
+    monkeypatch.setattr(gui.subprocess, "run", _capture_run)
+    monkeypatch.setattr(gui.video_renderer, "_ffprobe_path", lambda _path: "/usr/bin/ffprobe")
+    monkeypatch.setattr(gui.video_renderer, "_SUBPROCESS_RUN", _fake_probe)
+
+    app._build_download_variant(
+        input_path,
+        to_shorts=False,
+        logo_path="",
+        video_effect="black_white",
+    )
+
+    filter_complex = commands[0][commands[0].index("-filter_complex") + 1]
+    assert "scale=1920:1080" not in filter_complex
+    assert "unsharp=5:5:0.45:5:5:0.0" in filter_complex
 
 
 def test_build_download_variant_boosts_logo_for_portrait_output(
@@ -1357,6 +1412,7 @@ def test_build_download_variant_preview_uses_high_quality_scale(monkeypatch, tmp
         "scale=1080:-2:flags=lanczos+accurate_rnd+full_chroma_int"
         in filter_complex
     )
+    assert "unsharp=5:5:0.45:5:5:0.0" in filter_complex
     assert commands[0][commands[0].index("-preset") + 1] == "slow"
     assert commands[0][commands[0].index("-crf") + 1] == "14"
     assert commands[0][commands[0].index("-b:a") + 1] == "256k"
@@ -1485,7 +1541,7 @@ def test_build_download_variant_adds_intro_progress_and_watermark(
     )
     assert (
         "geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':"
-        "a='alpha(X,Y)*(0.35+0.15*sin(T*0.8))'"
+        "a='alpha(X,Y)*(0.50+0.25*sin(T*1.0))'"
     ) in filter_complex
     assert "[watermark]overlay=1594:54:format=auto" in filter_complex
 

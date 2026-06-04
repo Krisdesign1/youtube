@@ -22,6 +22,9 @@ DEFAULT_DISPLAY_DURATION_SECONDS = 4
 MIN_DISPLAY_DURATION_SECONDS = 2
 MAX_DISPLAY_DURATION_SECONDS = 30
 
+# Render at 2× then downscale — eliminates PIL's jagged text edges
+_RENDER_SCALE = 2
+
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
@@ -35,6 +38,7 @@ class LowerThirdConfig:
     font_size_ratio: float = 0.042
     height_ratio: float = 0.14
     show_subscribe: bool = True
+    position: str = "bottom"  # "bottom" or "top"
 
 
 def normalize_hex_color(value: object, default: str) -> str:
@@ -69,9 +73,11 @@ def config_from_hex(
     accent_color: object = DEFAULT_ACCENT_COLOR,
     show_subscribe: bool = True,
     video_format: str = "16:9",
+    position: str = "bottom",
 ) -> LowerThirdConfig:
     normalized_bg = normalize_hex_color(bg_color, DEFAULT_BG_COLOR)
     normalized_accent = normalize_hex_color(accent_color, DEFAULT_ACCENT_COLOR)
+    normalized_position = position if position in {"bottom", "top"} else "bottom"
     return LowerThirdConfig(
         channel_name=" ".join(str(channel_name or "").split()),
         tagline=" ".join(str(tagline or "").split()),
@@ -89,7 +95,35 @@ def config_from_hex(
         font_size_ratio=0.038 if video_format == "9:16" else 0.042,
         height_ratio=0.12 if video_format == "9:16" else 0.14,
         show_subscribe=bool(show_subscribe),
+        position=normalized_position,
     )
+
+
+def _draw_gradient_band(
+    image: Image.Image,
+    band_y: int,
+    width: int,
+    height: int,
+    color: tuple[int, int, int, int],
+    *,
+    fade_start: float = 0.60,
+) -> None:
+    """Horizontal gradient band: solid on the left, fading to transparent on the right."""
+    band_height = height - band_y
+    if band_height <= 0:
+        return
+    r, g, b, a = color
+    src_w = 400
+    fade_px = int(src_w * fade_start)
+    src = Image.new("RGBA", (src_w, 1))
+    for x in range(src_w):
+        if x < fade_px:
+            src.putpixel((x, 0), (r, g, b, a))
+        else:
+            t = (x - fade_px) / (src_w - fade_px)
+            src.putpixel((x, 0), (r, g, b, max(0, int(a * (1.0 - t)))))
+    gradient = src.resize((width, band_height), Image.LANCZOS)
+    image.alpha_composite(gradient, (0, band_y))
 
 
 def generate_lower_third(
@@ -99,47 +133,55 @@ def generate_lower_third(
     output_path: str,
 ) -> str:
     """Generate a transparent PNG matching the final video resolution."""
+    s = _RENDER_SCALE
     width = max(1, int(video_width))
     height = max(1, int(video_height))
-    image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    render_width = width * s
+    render_height = height * s
+
+    image = Image.new("RGBA", (render_width, render_height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
 
-    band_h = max(48, int(height * config.height_ratio))
-    band_y = height - band_h
-    font_size = max(14, int(height * config.font_size_ratio))
-    tagline_size = max(10, int(font_size * 0.55))
-    padding = max(16, int(width * 0.03))
+    band_h = max(48 * s, int(render_height * config.height_ratio))
+    top_position = config.position == "top"
+    band_y = 0 if top_position else render_height - band_h
+    band_end = band_h if top_position else render_height
+    font_size = max(14 * s, int(render_height * config.font_size_ratio))
+    tagline_size = max(10 * s, int(font_size * 0.55))
+    padding = max(16 * s, int(render_width * 0.03))
 
-    draw.rectangle([0, band_y, width, height], fill=config.bg_color)
+    _draw_gradient_band(image, band_y, render_width, band_end, config.bg_color)
 
-    accent_w = max(4, int(width * 0.005))
-    accent_y_pad = max(8, int(band_h * 0.16))
+    accent_w = max(4 * s, int(render_width * 0.005))
+    accent_y_pad = max(8 * s, int(band_h * 0.16))
     draw.rectangle(
-        [padding, band_y + accent_y_pad, padding + accent_w, height - accent_y_pad],
+        [padding, band_y + accent_y_pad, padding + accent_w, band_end - accent_y_pad],
         fill=config.accent_color,
     )
 
     font_bold = _load_font(["Arial Bold.ttf", "Arial-Bold.ttf"], font_size)
     font_tagline = _load_font(["Arial.ttf", "Arial Unicode.ttf"], tagline_size)
 
-    text_x = padding + accent_w + max(12, int(padding * 0.6))
-    max_text_width = width - text_x - padding
+    text_x = padding + accent_w + max(12 * s, int(padding * 0.6))
+    max_text_width = render_width - text_x - padding
 
     subscribe_box: tuple[int, int, int, int] | None = None
     subscribe_text = "Abonnez-vous"
-    subscribe_font = _load_font(["Arial.ttf", "Arial Unicode.ttf"], max(11, int(font_size * 0.58)))
+    subscribe_font = _load_font(
+        ["Arial.ttf", "Arial Unicode.ttf"], max(11 * s, int(font_size * 0.58))
+    )
     if config.show_subscribe:
         btn_bbox = draw.textbbox((0, 0), subscribe_text, font=subscribe_font)
         btn_text_w = btn_bbox[2] - btn_bbox[0]
         btn_text_h = btn_bbox[3] - btn_bbox[1]
-        btn_pad_x = max(10, int(font_size * 0.42))
-        btn_pad_y = max(6, int(font_size * 0.24))
-        btn_x2 = width - padding
+        btn_pad_x = max(10 * s, int(font_size * 0.42))
+        btn_pad_y = max(6 * s, int(font_size * 0.24))
+        btn_x2 = render_width - padding
         btn_x1 = btn_x2 - btn_text_w - (btn_pad_x * 2)
         btn_y1 = band_y + ((band_h - btn_text_h - (btn_pad_y * 2)) // 2)
         btn_y2 = btn_y1 + btn_text_h + (btn_pad_y * 2)
         subscribe_box = (btn_x1, btn_y1, btn_x2, btn_y2)
-        max_text_width = max(80, btn_x1 - text_x - padding)
+        max_text_width = max(80 * s, btn_x1 - text_x - padding)
 
     title = _fit_text(draw, config.channel_name, font_bold, max_text_width)
     tagline = _fit_text(draw, config.tagline, font_tagline, max_text_width)
@@ -149,30 +191,36 @@ def generate_lower_third(
     if tagline:
         tagline_bbox = draw.textbbox((0, 0), tagline, font=font_tagline)
         tagline_h = tagline_bbox[3] - tagline_bbox[1]
-    gap = max(4, int(font_size * 0.16)) if tagline else 0
+    gap = max(4 * s, int(font_size * 0.16)) if tagline else 0
     text_block_h = title_h + gap + tagline_h
     text_y = band_y + ((band_h - text_block_h) // 2)
 
+    shadow_offset = max(2 * s, int(font_size * 0.06))
+    shadow_color = (0, 0, 0, 120)
+    draw.text(
+        (text_x + shadow_offset, text_y + shadow_offset),
+        title,
+        font=font_bold,
+        fill=shadow_color,
+    )
     draw.text((text_x, text_y), title, font=font_bold, fill=config.text_color)
+
     if tagline:
-        muted = (
-            config.text_color[0],
-            config.text_color[1],
-            config.text_color[2],
-            210,
-        )
+        tagline_y = text_y + title_h + gap
+        muted = (config.text_color[0], config.text_color[1], config.text_color[2], 210)
         draw.text(
-            (text_x, text_y + title_h + gap),
+            (text_x + shadow_offset, tagline_y + shadow_offset),
             tagline,
             font=font_tagline,
-            fill=muted,
+            fill=shadow_color,
         )
+        draw.text((text_x, tagline_y), tagline, font=font_tagline, fill=muted)
 
     if subscribe_box is not None:
         btn_x1, btn_y1, btn_x2, btn_y2 = subscribe_box
         draw.rounded_rectangle(
             [btn_x1, btn_y1, btn_x2, btn_y2],
-            radius=max(8, (btn_y2 - btn_y1) // 2),
+            radius=max(8 * s, (btn_y2 - btn_y1) // 2),
             fill=config.accent_color,
         )
         btn_bbox = draw.textbbox((0, 0), subscribe_text, font=subscribe_font)
@@ -188,7 +236,8 @@ def generate_lower_third(
             fill=(255, 255, 255, 255),
         )
 
-    image.save(output_path, format="PNG")
+    final = image.resize((width, height), Image.LANCZOS)
+    final.save(output_path, format="PNG")
     return output_path
 
 
@@ -221,9 +270,26 @@ def _load_font(candidates: list[str], size: int) -> ImageFont.ImageFont:
     paths = [
         *candidates,
         "DejaVuSans-Bold.ttf",
+        # macOS
         "/System/Library/Fonts/Supplemental/Arial.ttf",
         "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Black.ttf",
         "/Library/Fonts/Arial.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/System/Library/Fonts/SFNSText.ttf",
+        # Linux — Debian/Ubuntu
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+        # Linux — Fedora/RHEL
+        "/usr/share/fonts/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf",
+        # Windows
+        "C:/Windows/Fonts/arialbd.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+        "C:/Windows/Fonts/segoeui.ttf",
     ]
     for candidate in paths:
         try:

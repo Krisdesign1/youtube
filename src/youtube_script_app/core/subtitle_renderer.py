@@ -29,7 +29,13 @@ SUBTITLE_STYLES = {
     "cinema",
     "box",
     "minimal",
+    "word",
 }
+
+# Pop animation: start at 128 % scale, spring to 100 % over 150 ms, fade out 35 ms.
+# The slight overlap between consecutive words (handled in rechunk_words) makes the
+# transition seamless — no blank frame between words.
+_WORD_POP_TAG = r"{\fscx128\fscy128\t(0,150,\fscx100\fscy100)\fad(0,35)}"
 
 VIDEO_EFFECTS = {
     "none",
@@ -42,9 +48,11 @@ VIDEO_EFFECTS = {
 VIDEO_EFFECT_FILTERS = {
     "none": "",
     "black_white": "hue=s=0",
-    "contrast": "eq=contrast=1.25:brightness=-0.03:saturation=1.12",
-    "cinematic": "eq=contrast=1.18:brightness=-0.05:saturation=0.82,vignette=PI/5",
-    "vintage": "eq=contrast=1.08:saturation=0.72:gamma=1.05,noise=alls=6:allf=t+u",
+    "contrast": "eq=contrast=1.25:brightness=-0.03:saturation=1.15",
+    # vignette PI/4 (45°) is noticeably more cinematic than PI/5 (36°)
+    "cinematic": "eq=contrast=1.18:brightness=-0.05:saturation=0.82,vignette=PI/4",
+    # alls=10 produces visible film grain; allf=t+u keeps it temporally varied
+    "vintage": "eq=contrast=1.08:saturation=0.72:gamma=1.05,noise=alls=10:allf=t+u",
 }
 
 VIDEO_EFFECT_SUFFIXES = {
@@ -74,8 +82,10 @@ _FONT_RATIOS: dict[str, dict[str, float]] = {
     "impact": {"16:9": 0.048, "9:16": 0.058},
     "modern": {"16:9": 0.040, "9:16": 0.050},
     "cinema": {"16:9": 0.034, "9:16": 0.042},
-    "box": {"16:9": 0.038, "9:16": 0.046},
-    "minimal": {"16:9": 0.028, "9:16": 0.034},
+    "box":    {"16:9": 0.038, "9:16": 0.046},
+    "minimal":{"16:9": 0.028, "9:16": 0.034},
+    # Larger than impact — a single word needs more visual weight
+    "word":   {"16:9": 0.056, "9:16": 0.068},
 }
 
 _MARGIN_V_RATIO = 0.08
@@ -158,11 +168,22 @@ def _wrap_chunk_words(words: list[str], max_chars: int) -> str:
     return " ".join(words[:split_at]) + "\n" + " ".join(words[split_at:])
 
 
+def _cap_durations_to_next_start(blocks: list[dict]) -> list[dict]:
+    """Empêche tout chevauchement : tronque la durée de chaque bloc si elle dépasse
+    le début du suivant. Laisse 20 ms de marge pour éviter le flash."""
+    for i in range(len(blocks) - 1):
+        gap = blocks[i + 1]["start"] - blocks[i]["start"]
+        if blocks[i]["duration"] > gap:
+            blocks[i]["duration"] = round(max(0.05, gap - 0.02), 3)
+    return blocks
+
+
 def rechunk_blocks(
     chunks: Iterable[dict],
     video_format: str,
     clip_start: float = 0.0,
     clip_duration: float | None = None,
+    offset_sec: float = 0.0,
 ) -> list[dict]:
     """
     Redecoupe les blocs YouTube en unites optimales pour l'affichage.
@@ -229,18 +250,19 @@ def rechunk_blocks(
             result.append(
                 {
                     "text": chunk_text,
-                    "start": round(chunk_start - window_start, 3),
+                    "start": round(max(0.0, chunk_start - window_start + offset_sec), 3),
                     "duration": round(chunk_duration, 3),
                 }
             )
 
     result.sort(key=lambda item: item["start"])
-    return _merge_close_blocks(
+    result = _merge_close_blocks(
         result,
         max_words=max_words,
         max_chars=max_chars,
         max_duration=MAX_DURATION_SEC,
     )
+    return _cap_durations_to_next_start(result)
 
 
 def _merge_close_blocks(
@@ -278,6 +300,47 @@ def _merge_close_blocks(
             merged.append(current.copy())
 
     return merged
+
+
+def rechunk_words(
+    chunks: Iterable[dict],
+    video_format: str,
+    clip_start: float = 0.0,
+    clip_duration: float | None = None,
+    *,
+    uppercase: bool = True,
+    offset_sec: float = 0.0,
+) -> list[dict]:
+    """Split transcript into one-word-at-a-time blocks for the viral word style.
+
+    Each word gets its exact share of the block's duration. The pop animation
+    handles the visual transition; _cap_durations_to_next_start ensures no
+    two words are ever displayed simultaneously.
+    """
+    blocks = rechunk_blocks(
+        chunks, video_format, clip_start=clip_start, clip_duration=clip_duration, offset_sec=offset_sec
+    )
+    words: list[dict] = []
+    for block in blocks:
+        text = str(block.get("text", "")).replace("\\N", " ").strip()
+        word_list = text.split()
+        if not word_list:
+            continue
+        start = float(block["start"])
+        duration = float(block["duration"])
+        n = len(word_list)
+        word_dur = duration / n
+        # Durée exacte de la part du mot — pas d'extension pour éviter la
+        # superposition. _cap_durations_to_next_start assure l'absence de chevauchement.
+        display_dur = max(min(word_dur, MAX_DURATION_SEC), 0.08)
+        for i, word in enumerate(word_list):
+            w = word.upper() if uppercase else word
+            words.append({
+                "text": w,
+                "start": round(start + i * word_dur, 3),
+                "duration": round(display_dur, 3),
+            })
+    return _cap_durations_to_next_start(words)
 
 
 def build_subtitle_entries(
@@ -432,7 +495,7 @@ def build_ass_header(video_width: int, video_height: int) -> str:
     )
 
 
-def build_ass_events(chunks: Iterable[dict]) -> str:
+def build_ass_events(chunks: Iterable[dict], *, word_by_word: bool = False) -> str:
     """Genere la section ``[Events]`` depuis des chunks normalises."""
     lines = [
         "[Events]",
@@ -454,9 +517,17 @@ def build_ass_events(chunks: Iterable[dict]) -> str:
         text = _escape_ass_event_text(chunk.get("text", ""))
         if not text:
             continue
+        if word_by_word:
+            # Pop animation: spring from 128 % → 100 % scale, fade-out tail
+            tag = _WORD_POP_TAG
+        else:
+            # \fad(in_ms, out_ms) — shorter fade for very brief lines
+            duration_ms = int((end - start) * 1000)
+            fade_ms = 30 if duration_ms < 700 else 60
+            tag = f"{{\\fad({fade_ms},{fade_ms})}}"
         lines.append(
             f"Dialogue: 0,{ass_timestamp(start)},{ass_timestamp(end)},"
-            f"Default,,0,0,0,,{text}"
+            f"Default,,0,0,0,,{tag}{text}"
         )
 
     return "\n".join(lines) + "\n"
@@ -470,6 +541,9 @@ def build_ass_file(
     video_format: str,
 ) -> str:
     """Construit le contenu complet du fichier ASS."""
+    is_word = normalize_subtitle_style(design) == "word"
+    # "word" reuses impact's visual style (bold Arial Black, white + outline)
+    # but with a larger font size defined in _FONT_RATIOS["word"].
     style = build_ass_style(design, video_width, video_height, video_format)
     sections = [
         build_ass_header(video_width, video_height),
@@ -480,7 +554,7 @@ def build_ass_file(
         "Alignment, MarginL, MarginR, MarginV, Encoding",
         ass_style_to_string(style),
         "",
-        build_ass_events(chunks),
+        build_ass_events(chunks, word_by_word=is_word),
     ]
     return "\n".join(sections)
 

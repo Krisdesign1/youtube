@@ -25,6 +25,7 @@ def default_gui_settings() -> dict:
         "download_logo_size_mode": "relative",
         "download_logo_scale_percent": download_utils.DEFAULT_LOGO_SCALE_PERCENT,
         "download_logo_opacity_percent": 100,
+        "download_logo_duration": 0,  # 0 = toujours visible
         "download_logo_width_ratio": download_utils.DEFAULT_LOGO_WIDTH_RATIO,
         "download_logo_x_ratio": download_utils.DEFAULT_LOGO_X_RATIO,
         "download_logo_y_ratio": download_utils.DEFAULT_LOGO_Y_RATIO,
@@ -154,6 +155,14 @@ def normalize_gui_settings(raw: object) -> dict:
     except (TypeError, ValueError):
         logo_opacity_percent = settings["download_logo_opacity_percent"]
     settings["download_logo_opacity_percent"] = max(10, min(100, logo_opacity_percent))
+
+    try:
+        logo_duration = int(
+            raw.get("download_logo_duration", settings["download_logo_duration"])
+        )
+    except (TypeError, ValueError):
+        logo_duration = settings["download_logo_duration"]
+    settings["download_logo_duration"] = max(0, min(120, logo_duration))
 
     settings["download_subtitles_enabled"] = coerce_bool(
         raw.get(

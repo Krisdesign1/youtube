@@ -185,6 +185,8 @@ class TranscriptApp:
         )
         self.download_logo_opacity_var = tk.IntVar(value=100)
         self.download_logo_opacity_label_var = tk.StringVar(value="100%")
+        self.download_logo_duration_var = tk.IntVar(value=0)
+        self.download_shorts_blur_var = tk.BooleanVar(value=True)
         self.download_logo_position_var = tk.StringVar(value="Haut droit")
         self.download_logo_position_lookup = {
             "Haut gauche": "top-left",
@@ -198,14 +200,16 @@ class TranscriptApp:
             "Bas droit": "bottom-right",
         }
         self.download_subtitles_enabled_var = tk.BooleanVar(value=True)
+        self.download_subtitle_offset_var = tk.IntVar(value=-200)
         self.download_subtitle_style_lookup = {
+            "Viral mot par mot": "word",
             "Impact TikTok": "impact",
             "Moderne blanc": "modern",
             "Cinéma": "cinema",
             "Boîte noire": "box",
             "Minimal": "minimal",
         }
-        self.download_subtitle_style_var = tk.StringVar(value="Impact TikTok")
+        self.download_subtitle_style_var = tk.StringVar(value="Viral mot par mot")
         self.download_video_effect_lookup = {
             "Aucun": "none",
             "Noir et blanc": "black_white",
@@ -215,9 +219,13 @@ class TranscriptApp:
         }
         self.download_video_effect_var = tk.StringVar(value="Aucun")
         self.download_intro_outro_enabled_var = tk.BooleanVar(value=False)
+        self.download_intro_outro_hold_var = tk.DoubleVar(value=1.5)
+        self.download_intro_outro_bg_color_var = tk.StringVar(value="#000000")
+        self.download_intro_outro_text_color_var = tk.StringVar(value="#FFFFFF")
         self.download_progress_bar_enabled_var = tk.BooleanVar(value=False)
         self.download_animated_watermark_enabled_var = tk.BooleanVar(value=False)
         self.download_lower_third_enabled_var = tk.BooleanVar(value=False)
+        self.download_lower_third_position_var = tk.StringVar(value="Bas")
         self.download_lower_third_name_var = tk.StringVar(value="")
         self.download_lower_third_tagline_var = tk.StringVar(value="")
         self.download_lower_third_subscribe_var = tk.BooleanVar(value=True)
@@ -239,6 +247,7 @@ class TranscriptApp:
         self.download_lower_third_display_duration_label_var = tk.StringVar(
             value=f"{lower_third.DEFAULT_DISPLAY_DURATION_SECONDS}s"
         )
+        self.config_summary_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value="Prêt.")
         self.meta_var = tk.StringVar(value="")
         self.stats_var = tk.StringVar(value="Lignes: 0 | Caractères: 0")
@@ -361,6 +370,7 @@ class TranscriptApp:
             "<FocusOut>", self._on_download_logo_focus_out, add="+"
         )
         self._update_generate_state()
+        self._update_config_summary()
         self._bind_shortcuts()
 
     def _apply_blue_theme(self) -> None:
@@ -602,6 +612,23 @@ class TranscriptApp:
             "TCombobox",
             fieldbackground=self.palette["card"],
             foreground=self.palette["text"],
+        )
+        self.style.configure(
+            "Options.TNotebook",
+            background=self.palette["card"],
+            tabmargins=[0, 4, 0, 0],
+        )
+        self.style.configure(
+            "Options.TNotebook.Tab",
+            background=self.palette["bg_alt"],
+            foreground=self.palette["muted"],
+            padding=[14, 6],
+            font=(self.font_family, 10),
+        )
+        self.style.map(
+            "Options.TNotebook.Tab",
+            background=[("selected", self.palette["soft_primary"])],
+            foreground=[("selected", self.palette["accent"])],
         )
         self.style.configure(
             "Blue.Horizontal.TProgressbar",
@@ -918,9 +945,20 @@ class TranscriptApp:
 
         self._apply_placeholder(self.url_entry, "https://www.youtube.com/watch?v=... ou lien social")
 
+        self.config_summary_label = ttk.Label(
+            url_card,
+            textvariable=self.config_summary_var,
+            style="CardMuted.TLabel",
+        )
+        self.config_summary_label.grid(
+            row=4, column=0, columnspan=2, sticky="w", padx=16, pady=(0, 10)
+        )
+
         download_status_shadow = tk.Frame(container, bg=self.palette["shadow"])
         download_status_shadow.grid(row=2, column=0, sticky="ew", pady=(0, 14))
         download_status_shadow.grid_columnconfigure(0, weight=1)
+        download_status_shadow.grid_remove()  # caché par défaut, affiché au démarrage d'un téléchargement
+        self._download_status_shadow = download_status_shadow
         download_status_card = tk.Frame(download_status_shadow, bg=self.palette["card"])
         download_status_card.grid(row=0, column=0, sticky="ew", padx=1, pady=1)
         download_status_card.grid_columnconfigure(0, weight=1)
@@ -1022,25 +1060,52 @@ class TranscriptApp:
         self.options_toggle_button.grid(row=0, column=1, sticky="e")
 
         self.options_body = tk.Frame(options_card, bg=self.palette["card"])
-        self.options_body.grid(row=1, column=0, sticky="ew", padx=16, pady=(8, 14))
+        self.options_body.grid(row=1, column=0, sticky="ew", padx=0, pady=(0, 14))
         self.options_body.grid_columnconfigure(0, weight=1)
 
-        ttk.Label(
-            self.options_body,
-            text="Langues (séparées par des virgules)",
-            style="Card.TLabel",
-        ).grid(row=0, column=0, sticky="w")
-        self.languages_entry = ttk.Entry(
-            self.options_body, textvariable=self.languages_var, style="Normal.TEntry"
+        self._options_notebook = ttk.Notebook(self.options_body, style="Options.TNotebook")
+        self._options_notebook.grid(row=0, column=0, sticky="nsew", padx=16, pady=(4, 0))
+        options_notebook = self._options_notebook
+
+        _tabs: dict[str, tk.Frame] = {}
+        for _key, _label in [
+            ("trans", "Transcription"),
+            ("video", "Vidéo"),
+            ("logo",  "Logo"),
+            ("subs",  "Sous-titres"),
+        ]:
+            # tk.Frame (non-ttk) pour éviter les conflits padding/grid_columnconfigure
+            _f = tk.Frame(options_notebook, bg=self.palette["card"])
+            _f.grid_columnconfigure(0, weight=1)
+            options_notebook.add(_f, padding=(12, 10))
+            options_notebook.tab(_f, text=_label)
+            _tabs[_key] = _f
+
+        # Redessine l'aperçu logo quand l'onglet Logo devient actif
+        def _on_tab_changed(event: tk.Event) -> None:
+            try:
+                idx = options_notebook.index(options_notebook.select())
+                if idx == 2:  # onglet Logo
+                    self.master.after_idle(self._redraw_logo_preview)
+            except tk.TclError:
+                pass
+        options_notebook.bind("<<NotebookTabChanged>>", _on_tab_changed)
+
+        # ── TAB: Transcription ──────────────────────────────────────────
+        _tr = _tabs["trans"]
+
+        ttk.Label(_tr, text="Langues (séparées par des virgules)", style="Card.TLabel").grid(
+            row=0, column=0, sticky="w"
         )
+        self.languages_entry = ttk.Entry(_tr, textvariable=self.languages_var, style="Normal.TEntry")
         self.languages_entry.grid(row=1, column=0, sticky="ew", pady=(6, 10))
         self._apply_placeholder(self.languages_entry, "fr,en")
 
-        ttk.Label(self.options_body, text="Format de sortie", style="Card.TLabel").grid(
+        ttk.Label(_tr, text="Format de sortie", style="Card.TLabel").grid(
             row=2, column=0, sticky="w"
         )
         self.format_combo = ttk.Combobox(
-            self.options_body,
+            _tr,
             textvariable=self.output_format_var,
             values=list(self.output_format_lookup.values()),
             state="readonly",
@@ -1048,240 +1113,236 @@ class TranscriptApp:
         self.format_combo.grid(row=3, column=0, sticky="w", pady=(6, 10))
 
         ttk.Checkbutton(
-            self.options_body,
+            _tr,
             text="Moments forts estimés",
             variable=self.most_viewed_var,
             style="Card.TCheckbutton",
         ).grid(row=4, column=0, sticky="w")
-        count_row = tk.Frame(self.options_body, bg=self.palette["card"])
+        count_row = tk.Frame(_tr, bg=self.palette["card"])
         count_row.grid(row=5, column=0, sticky="w", pady=(6, 0))
-        ttk.Label(count_row, text="Nombre", style="Card.TLabel").grid(
-            row=0, column=0, sticky="w"
-        )
-        self.most_viewed_spin = ttk.Spinbox(
-            count_row,
-            from_=1,
-            to=20,
-            width=5,
-            textvariable=self.most_viewed_count_var,
-        )
+        ttk.Label(count_row, text="Nombre", style="Card.TLabel").grid(row=0, column=0, sticky="w")
+        self.most_viewed_spin = ttk.Spinbox(count_row, from_=1, to=20, width=5, textvariable=self.most_viewed_count_var)
         self.most_viewed_spin.grid(row=0, column=1, sticky="w", padx=(10, 0))
 
-        duration_row = tk.Frame(self.options_body, bg=self.palette["card"])
+        duration_row = tk.Frame(_tr, bg=self.palette["card"])
         duration_row.grid(row=6, column=0, sticky="w", pady=(10, 0))
-        ttk.Label(duration_row, text="Durée extrait (s)", style="Card.TLabel").grid(
-            row=0, column=0, sticky="w"
-        )
-        self.clip_duration_spin = ttk.Spinbox(
-            duration_row,
-            from_=10,
-            to=300,
-            increment=10,
-            width=5,
-            textvariable=self.clip_duration_var,
-        )
+        ttk.Label(duration_row, text="Durée extrait (s)", style="Card.TLabel").grid(row=0, column=0, sticky="w")
+        self.clip_duration_spin = ttk.Spinbox(duration_row, from_=10, to=300, increment=10, width=5, textvariable=self.clip_duration_var)
         self.clip_duration_spin.grid(row=0, column=1, sticky="w", padx=(10, 0))
 
-        format_row = tk.Frame(self.options_body, bg=self.palette["card"])
-        format_row.grid(row=7, column=0, sticky="w", pady=(10, 0))
-        ttk.Label(format_row, text="Format vidéo", style="Card.TLabel").grid(
-            row=0, column=0, sticky="w"
-        )
-        self.video_format_combo = ttk.Combobox(
-            format_row,
-            textvariable=self.video_format_var,
-            values=["mp4", "webm"],
-            state="readonly",
-            width=6,
-        )
+        # ── TAB: Vidéo ─────────────────────────────────────────────────
+        _vi = _tabs["video"]
+        _vi.grid_columnconfigure(0, weight=1)
+
+        format_row = tk.Frame(_vi, bg=self.palette["card"])
+        format_row.grid(row=0, column=0, sticky="w")
+        ttk.Label(format_row, text="Format vidéo", style="Card.TLabel").grid(row=0, column=0, sticky="w")
+        self.video_format_combo = ttk.Combobox(format_row, textvariable=self.video_format_var, values=["mp4", "webm"], state="readonly", width=6)
         self.video_format_combo.grid(row=0, column=1, sticky="w", padx=(10, 0))
 
-        preset_row = tk.Frame(self.options_body, bg=self.palette["card"])
-        preset_row.grid(row=8, column=0, sticky="w", pady=(10, 0))
-        ttk.Label(preset_row, text="Preset créatif", style="Card.TLabel").grid(
-            row=0, column=0, sticky="w"
-        )
-        self.download_preset_combo = ttk.Combobox(
-            preset_row,
-            textvariable=self.download_preset_var,
-            values=list(self.download_preset_lookup.keys()),
-            state="readonly",
-            width=18,
-        )
+        preset_row = tk.Frame(_vi, bg=self.palette["card"])
+        preset_row.grid(row=1, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(preset_row, text="Preset créatif", style="Card.TLabel").grid(row=0, column=0, sticky="w")
+        self.download_preset_combo = ttk.Combobox(preset_row, textvariable=self.download_preset_var, values=list(self.download_preset_lookup.keys()), state="readonly", width=18)
         self.download_preset_combo.grid(row=0, column=1, sticky="w", padx=(10, 0))
 
-        aspect_row = tk.Frame(self.options_body, bg=self.palette["card"])
-        aspect_row.grid(row=9, column=0, sticky="w", pady=(10, 0))
-        ttk.Label(aspect_row, text="Format final", style="Card.TLabel").grid(
-            row=0, column=0, sticky="w"
-        )
-        self.download_aspect_ratio_combo = ttk.Combobox(
-            aspect_row,
-            textvariable=self.download_aspect_ratio_var,
-            values=list(self.download_aspect_ratio_lookup.keys()),
-            state="readonly",
-            width=14,
-        )
+        aspect_row = tk.Frame(_vi, bg=self.palette["card"])
+        aspect_row.grid(row=2, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(aspect_row, text="Format final", style="Card.TLabel").grid(row=0, column=0, sticky="w")
+        self.download_aspect_ratio_combo = ttk.Combobox(aspect_row, textvariable=self.download_aspect_ratio_var, values=list(self.download_aspect_ratio_lookup.keys()), state="readonly", width=14)
         self.download_aspect_ratio_combo.grid(row=0, column=1, sticky="w", padx=(10, 0))
 
-        self.download_logo_check = ttk.Checkbutton(
-            self.options_body,
-            text="Intégrer le logo",
-            variable=self.download_logo_enabled_var,
-            command=self._on_download_logo_toggle,
+        self.download_shorts_blur_check = ttk.Checkbutton(
+            _vi,
+            text="Fond flouté (pillarbox Shorts)",
+            variable=self.download_shorts_blur_var,
             style="Card.TCheckbutton",
         )
-        self.download_logo_check.grid(row=10, column=0, sticky="w", pady=(8, 0))
+        self.download_shorts_blur_check.grid(row=3, column=0, sticky="w", pady=(6, 0))
 
-        logo_row = tk.Frame(self.options_body, bg=self.palette["card"])
-        logo_row.grid(row=11, column=0, sticky="ew", pady=(8, 0))
+        video_effect_row_vi = tk.Frame(_vi, bg=self.palette["card"])
+        video_effect_row_vi.grid(row=4, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(video_effect_row_vi, text="Effet vidéo", style="Card.TLabel").grid(row=0, column=0, sticky="w")
+        self.download_video_effect_combo = ttk.Combobox(video_effect_row_vi, textvariable=self.download_video_effect_var, values=list(self.download_video_effect_lookup.keys()), state="readonly", width=16)
+        self.download_video_effect_combo.grid(row=0, column=1, sticky="w", padx=(10, 0))
+
+        value_add_row = tk.Frame(_vi, bg=self.palette["card"])
+        value_add_row.grid(row=5, column=0, sticky="w", pady=(14, 0))
+        ttk.Label(value_add_row, text="Valeur ajoutée", style="Card.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 4))
+        self.download_intro_outro_check = ttk.Checkbutton(value_add_row, text="Intro / Outro", variable=self.download_intro_outro_enabled_var, style="Card.TCheckbutton",
+            command=self._on_intro_outro_toggle)
+        self.download_intro_outro_check.grid(row=1, column=0, sticky="w")
+
+        self.download_intro_outro_options = tk.Frame(value_add_row, bg=self.palette["card"])
+        self.download_intro_outro_options.grid(row=2, column=0, sticky="ew", padx=(16, 0), pady=(4, 0))
+        self.download_intro_outro_options.grid_columnconfigure(1, weight=1)
+        # Durée hold
+        ttk.Label(self.download_intro_outro_options, text="Durée affichage (s)", style="Card.TLabel").grid(row=0, column=0, sticky="w")
+        self.download_intro_outro_hold_spin = ttk.Spinbox(
+            self.download_intro_outro_options, from_=0.5, to=5.0, increment=0.5, width=5,
+            textvariable=self.download_intro_outro_hold_var,
+        )
+        self.download_intro_outro_hold_spin.grid(row=0, column=1, sticky="w", padx=(10, 0))
+        # Couleurs
+        intro_color_row = tk.Frame(self.download_intro_outro_options, bg=self.palette["card"])
+        intro_color_row.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self.download_intro_outro_bg_button = ttk.Button(
+            intro_color_row, text="Fond", style="Subtle.TButton",
+            command=lambda: self._pick_intro_outro_color(self.download_intro_outro_bg_color_var, self.download_intro_outro_bg_swatch),
+        )
+        self.download_intro_outro_bg_button.grid(row=0, column=0, sticky="w")
+        self.download_intro_outro_bg_swatch = tk.Label(
+            intro_color_row, width=3,
+            bg=self.download_intro_outro_bg_color_var.get(), relief="solid", borderwidth=1,
+        )
+        self.download_intro_outro_bg_swatch.grid(row=0, column=1, padx=(6, 12))
+        self.download_intro_outro_text_button = ttk.Button(
+            intro_color_row, text="Texte", style="Subtle.TButton",
+            command=lambda: self._pick_intro_outro_color(self.download_intro_outro_text_color_var, self.download_intro_outro_text_swatch),
+        )
+        self.download_intro_outro_text_button.grid(row=0, column=2, sticky="w")
+        self.download_intro_outro_text_swatch = tk.Label(
+            intro_color_row, width=3,
+            bg=self.download_intro_outro_text_color_var.get(), relief="solid", borderwidth=1,
+        )
+        self.download_intro_outro_text_swatch.grid(row=0, column=3, padx=(6, 0))
+        self.download_intro_outro_options.grid_remove()  # masqué par défaut
+
+        self.download_progress_bar_check = ttk.Checkbutton(value_add_row, text="Barre de progression", variable=self.download_progress_bar_enabled_var, style="Card.TCheckbutton")
+        self.download_progress_bar_check.grid(row=3, column=0, sticky="w", pady=(4, 0))
+        self.download_animated_watermark_check = ttk.Checkbutton(value_add_row, text="Filigrane animé", variable=self.download_animated_watermark_enabled_var, style="Card.TCheckbutton")
+        self.download_animated_watermark_check.grid(row=4, column=0, sticky="w", pady=(4, 0))
+
+        # ── TAB: Logo ──────────────────────────────────────────────────
+        _lo = _tabs["logo"]
+        _lo.grid_columnconfigure(0, weight=1)
+
+        self.download_logo_check = ttk.Checkbutton(
+            _lo, text="Intégrer le logo",
+            variable=self.download_logo_enabled_var,
+            command=self._on_download_logo_toggle, style="Card.TCheckbutton",
+        )
+        self.download_logo_check.grid(row=0, column=0, sticky="w")
+
+        logo_row = tk.Frame(_lo, bg=self.palette["card"])
+        logo_row.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         logo_row.grid_columnconfigure(0, weight=1)
-        ttk.Label(
-            logo_row,
-            text="Logo à intégrer (facultatif)",
-            style="Card.TLabel",
-        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(logo_row, text="Logo à intégrer (facultatif)", style="Card.TLabel").grid(row=0, column=0, sticky="w")
         logo_input = tk.Frame(logo_row, bg=self.palette["card"])
         logo_input.grid(row=1, column=0, sticky="ew", pady=(4, 0))
         logo_input.grid_columnconfigure(0, weight=1)
-        self.download_logo_entry = ttk.Entry(
-            logo_input,
-            textvariable=self.download_logo_var,
-            style="Normal.TEntry",
-        )
+        self.download_logo_entry = ttk.Entry(logo_input, textvariable=self.download_logo_var, style="Normal.TEntry")
         self.download_logo_entry.grid(row=0, column=0, sticky="ew")
-        self.download_logo_button = ttk.Button(
-            logo_input,
-            text="Choisir…",
-            command=self.select_download_logo,
-            style="Secondary.TButton",
-        )
+        self.download_logo_button = ttk.Button(logo_input, text="Choisir…", command=self.select_download_logo, style="Secondary.TButton")
         self.download_logo_button.grid(row=0, column=1, sticky="w", padx=(10, 0))
         self._apply_placeholder(self.download_logo_entry, DOWNLOAD_LOGO_PLACEHOLDER)
 
-        logo_position_row = tk.Frame(self.options_body, bg=self.palette["card"])
-        logo_position_row.grid(row=12, column=0, sticky="ew", pady=(8, 0))
+        logo_position_row = tk.Frame(_lo, bg=self.palette["card"])
+        logo_position_row.grid(row=2, column=0, sticky="ew", pady=(8, 0))
         logo_position_row.grid_columnconfigure(0, weight=1)
-        ttk.Label(
-            logo_position_row,
-            text="Position du logo",
-            style="Card.TLabel",
-        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(logo_position_row, text="Position du logo", style="Card.TLabel").grid(row=0, column=0, sticky="w")
         self.download_logo_position_combo = ttk.Combobox(
-            logo_position_row,
-            textvariable=self.download_logo_position_var,
-            values=list(self.download_logo_position_lookup.keys()),
-            state="readonly",
-            width=16,
+            logo_position_row, textvariable=self.download_logo_position_var,
+            values=list(self.download_logo_position_lookup.keys()), state="readonly", width=16,
         )
-        self.download_logo_position_combo.grid(
-            row=0, column=1, sticky="w", padx=(10, 0)
-        )
+        self.download_logo_position_combo.grid(row=0, column=1, sticky="w", padx=(10, 0))
 
-        logo_preview_row = tk.Frame(self.options_body, bg=self.palette["card"])
-        logo_preview_row.grid(row=13, column=0, sticky="ew", pady=(8, 0))
+        logo_preview_row = tk.Frame(_lo, bg=self.palette["card"])
+        logo_preview_row.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         logo_preview_row.grid_columnconfigure(0, weight=1)
-        ttk.Label(
-            logo_preview_row,
-            text="Aperçu logo",
-            style="Card.TLabel",
-        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(logo_preview_row, text="Aperçu logo", style="Card.TLabel").grid(row=0, column=0, sticky="w")
         self.download_logo_preview_canvas = tk.Canvas(
-            logo_preview_row,
-            width=280,
-            height=158,
-            bg=self.palette["bg_alt"],
-            highlightthickness=1,
-            highlightbackground=self.palette["shadow"],
-            cursor="hand2",
+            logo_preview_row, width=280, height=158,
+            bg=self.palette["bg_alt"], highlightthickness=1,
+            highlightbackground=self.palette["shadow"], cursor="hand2",
         )
-        self.download_logo_preview_canvas.grid(
-            row=1, column=0, sticky="w", pady=(6, 0)
-        )
-        self.download_logo_preview_canvas.bind(
-            "<Configure>", lambda _event: self._redraw_logo_preview()
-        )
-        self.download_logo_preview_canvas.bind(
-            "<ButtonPress-1>", self._on_logo_preview_press
-        )
-        self.download_logo_preview_canvas.bind(
-            "<B1-Motion>", self._on_logo_preview_drag
-        )
+        self.download_logo_preview_canvas.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.download_logo_preview_canvas.bind("<Configure>", lambda _event: self._redraw_logo_preview())
+        self.download_logo_preview_canvas.bind("<ButtonPress-1>", self._on_logo_preview_press)
+        self.download_logo_preview_canvas.bind("<B1-Motion>", self._on_logo_preview_drag)
 
-        logo_size_row = tk.Frame(self.options_body, bg=self.palette["card"])
-        logo_size_row.grid(row=14, column=0, sticky="ew", pady=(8, 0))
+        logo_size_row = tk.Frame(_lo, bg=self.palette["card"])
+        logo_size_row.grid(row=4, column=0, sticky="ew", pady=(8, 0))
         logo_size_row.grid_columnconfigure(0, weight=1)
-        ttk.Label(logo_size_row, text="Taille logo", style="Card.TLabel").grid(
-            row=0, column=0, sticky="w"
-        )
-        ttk.Label(
-            logo_size_row,
-            textvariable=self.download_logo_size_label_var,
-            style="CardMuted.TLabel",
-        ).grid(row=0, column=1, sticky="e")
+        ttk.Label(logo_size_row, text="Taille logo", style="Card.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(logo_size_row, textvariable=self.download_logo_size_label_var, style="CardMuted.TLabel").grid(row=0, column=1, sticky="e")
         logo_size_mode_row = tk.Frame(logo_size_row, bg=self.palette["card"])
         logo_size_mode_row.grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
-        ttk.Label(logo_size_mode_row, text="Mode", style="Card.TLabel").grid(
-            row=0, column=0, sticky="w"
-        )
+        ttk.Label(logo_size_mode_row, text="Mode", style="Card.TLabel").grid(row=0, column=0, sticky="w")
         self.download_logo_size_mode_combo = ttk.Combobox(
-            logo_size_mode_row,
-            textvariable=self.download_logo_size_mode_var,
-            values=list(self.download_logo_size_mode_lookup.keys()),
-            state="readonly",
-            width=26,
+            logo_size_mode_row, textvariable=self.download_logo_size_mode_var,
+            values=list(self.download_logo_size_mode_lookup.keys()), state="readonly", width=26,
         )
         self.download_logo_size_mode_combo.grid(row=0, column=1, sticky="w", padx=(10, 0))
         self.download_logo_size_scale = ttk.Scale(
-            logo_size_row,
-            from_=20,
-            to=80,
-            variable=self.download_logo_size_var,
-            orient="horizontal",
-            command=self._on_logo_size_change,
+            logo_size_row, from_=20, to=80, variable=self.download_logo_size_var,
+            orient="horizontal", command=self._on_logo_size_change,
         )
-        self.download_logo_size_scale.grid(
-            row=2, column=0, columnspan=2, sticky="ew", pady=(4, 0)
-        )
+        self.download_logo_size_scale.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 0))
 
-        logo_opacity_row = tk.Frame(self.options_body, bg=self.palette["card"])
-        logo_opacity_row.grid(row=15, column=0, sticky="ew", pady=(8, 0))
+        logo_opacity_row = tk.Frame(_lo, bg=self.palette["card"])
+        logo_opacity_row.grid(row=5, column=0, sticky="ew", pady=(8, 0))
         logo_opacity_row.grid_columnconfigure(0, weight=1)
-        ttk.Label(logo_opacity_row, text="Opacité logo", style="Card.TLabel").grid(
-            row=0, column=0, sticky="w"
-        )
-        ttk.Label(
-            logo_opacity_row,
-            textvariable=self.download_logo_opacity_label_var,
-            style="CardMuted.TLabel",
-        ).grid(row=0, column=1, sticky="e")
+        ttk.Label(logo_opacity_row, text="Opacité logo", style="Card.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(logo_opacity_row, textvariable=self.download_logo_opacity_label_var, style="CardMuted.TLabel").grid(row=0, column=1, sticky="e")
         self.download_logo_opacity_scale = ttk.Scale(
-            logo_opacity_row,
-            from_=10,
-            to=100,
-            variable=self.download_logo_opacity_var,
-            orient="horizontal",
-            command=self._on_logo_opacity_change,
+            logo_opacity_row, from_=10, to=100, variable=self.download_logo_opacity_var,
+            orient="horizontal", command=self._on_logo_opacity_change,
         )
-        self.download_logo_opacity_scale.grid(
-            row=1, column=0, columnspan=2, sticky="ew", pady=(4, 0)
+        self.download_logo_opacity_scale.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+
+        logo_duration_row = tk.Frame(_lo, bg=self.palette["card"])
+        logo_duration_row.grid(row=6, column=0, sticky="ew", pady=(8, 0))
+        logo_duration_row.grid_columnconfigure(0, weight=1)
+        ttk.Label(logo_duration_row, text="Durée logo (s, 0 = toujours)", style="Card.TLabel").grid(row=0, column=0, sticky="w")
+        self.download_logo_duration_spin = ttk.Spinbox(
+            logo_duration_row, from_=0, to=120, increment=5, width=5,
+            textvariable=self.download_logo_duration_var,
         )
+        self.download_logo_duration_spin.grid(row=0, column=1, sticky="e")
+
+        # ── TAB: Sous-titres ───────────────────────────────────────────
+        _su = _tabs["subs"]
+        _su.grid_columnconfigure(0, weight=1)
+
+        self.download_subtitles_check = ttk.Checkbutton(
+            _su, text="Ajouter sous-titres",
+            variable=self.download_subtitles_enabled_var, style="Card.TCheckbutton",
+        )
+        self.download_subtitles_check.grid(row=0, column=0, sticky="w")
+
+        subtitle_style_row = tk.Frame(_su, bg=self.palette["card"])
+        subtitle_style_row.grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(subtitle_style_row, text="Design sous-titres", style="Card.TLabel").grid(row=0, column=0, sticky="w")
+        self.download_subtitle_style_combo = ttk.Combobox(
+            subtitle_style_row, textvariable=self.download_subtitle_style_var,
+            values=list(self.download_subtitle_style_lookup.keys()), state="readonly", width=18,
+        )
+        self.download_subtitle_style_combo.grid(row=0, column=1, sticky="w", padx=(10, 0))
+
+        subtitle_offset_row = tk.Frame(_su, bg=self.palette["card"])
+        subtitle_offset_row.grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(subtitle_offset_row, text="Décalage audio (ms)", style="Card.TLabel").grid(row=0, column=0, sticky="w")
+        self.download_subtitle_offset_spin = ttk.Spinbox(
+            subtitle_offset_row, from_=-800, to=800, increment=50, width=6,
+            textvariable=self.download_subtitle_offset_var,
+        )
+        self.download_subtitle_offset_spin.grid(row=0, column=1, sticky="w", padx=(10, 0))
+        ttk.Label(
+            subtitle_offset_row, text="(négatif = avancer, 0 = désactivé)",
+            style="CardMuted.TLabel",
+        ).grid(row=0, column=2, sticky="w", padx=(8, 0))
+
+        ttk.Separator(_su, orient="horizontal").grid(row=3, column=0, sticky="ew", pady=(14, 0))
 
         self.download_lower_third_check = ttk.Checkbutton(
-            self.options_body,
-            text="Ajouter lower third",
-            variable=self.download_lower_third_enabled_var,
-            style="Card.TCheckbutton",
+            _su, text="Ajouter lower third",
+            variable=self.download_lower_third_enabled_var, style="Card.TCheckbutton",
         )
-        self.download_lower_third_check.grid(
-            row=16, column=0, sticky="w", pady=(10, 0)
-        )
+        self.download_lower_third_check.grid(row=4, column=0, sticky="w", pady=(10, 0))
 
-        self.download_lower_third_frame = tk.Frame(
-            self.options_body,
-            bg=self.palette["card"],
-        )
-        self.download_lower_third_frame.grid(row=17, column=0, sticky="ew", pady=(8, 0))
+        self.download_lower_third_frame = tk.Frame(_su, bg=self.palette["card"])
+        self.download_lower_third_frame.grid(row=5, column=0, sticky="ew", pady=(8, 0))
         self.download_lower_third_frame.grid_columnconfigure(1, weight=1)
         ttk.Label(
             self.download_lower_third_frame,
@@ -1291,11 +1352,18 @@ class TranscriptApp:
         self.download_lower_third_name_entry = ttk.Entry(
             self.download_lower_third_frame,
             textvariable=self.download_lower_third_name_var,
-            width=28,
+            width=22,
         )
         self.download_lower_third_name_entry.grid(
             row=0, column=1, sticky="ew", padx=(10, 0)
         )
+        self.download_lower_third_fetch_button = ttk.Button(
+            self.download_lower_third_frame,
+            text="Récupérer ↓",
+            style="Subtle.TButton",
+            command=self._fetch_lower_third_from_url,
+        )
+        self.download_lower_third_fetch_button.grid(row=0, column=2, sticky="w", padx=(6, 0))
         ttk.Label(
             self.download_lower_third_frame,
             text="Tagline",
@@ -1304,10 +1372,10 @@ class TranscriptApp:
         self.download_lower_third_tagline_entry = ttk.Entry(
             self.download_lower_third_frame,
             textvariable=self.download_lower_third_tagline_var,
-            width=28,
+            width=22,
         )
         self.download_lower_third_tagline_entry.grid(
-            row=1, column=1, sticky="ew", padx=(10, 0), pady=(6, 0)
+            row=1, column=1, columnspan=2, sticky="ew", padx=(10, 0), pady=(6, 0)
         )
         self.download_lower_third_subscribe_check = ttk.Checkbutton(
             self.download_lower_third_frame,
@@ -1318,8 +1386,21 @@ class TranscriptApp:
         self.download_lower_third_subscribe_check.grid(
             row=2, column=0, columnspan=2, sticky="w", pady=(6, 0)
         )
+        lower_position_row = tk.Frame(self.download_lower_third_frame, bg=self.palette["card"])
+        lower_position_row.grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Label(
+            lower_position_row, text="Position", style="Card.TLabel",
+        ).grid(row=0, column=0, sticky="w")
+        self.download_lower_third_position_combo = ttk.Combobox(
+            lower_position_row,
+            textvariable=self.download_lower_third_position_var,
+            values=["Bas", "Haut"],
+            state="readonly",
+            width=8,
+        )
+        self.download_lower_third_position_combo.grid(row=0, column=1, sticky="w", padx=(10, 0))
         lower_color_row = tk.Frame(self.download_lower_third_frame, bg=self.palette["card"])
-        lower_color_row.grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        lower_color_row.grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
         self.download_lower_third_bg_button = ttk.Button(
             lower_color_row,
             text="Couleur fond",
@@ -1359,7 +1440,7 @@ class TranscriptApp:
             self.download_lower_third_frame,
             bg=self.palette["card"],
         )
-        lower_timing_row.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        lower_timing_row.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         lower_timing_row.grid_columnconfigure(0, weight=1)
         ttk.Label(
             lower_timing_row,
@@ -1380,6 +1461,8 @@ class TranscriptApp:
             variable=self.download_lower_third_interval_var,
             command=lambda _value: self._sync_lower_third_timing_labels(),
             bg=self.palette["card"],
+            troughcolor=self.palette["bg_alt"],
+            activebackground=self.palette["accent"],
             highlightthickness=0,
         )
         self.download_lower_third_interval_scale.grid(
@@ -1407,6 +1490,8 @@ class TranscriptApp:
             variable=self.download_lower_third_display_duration_var,
             command=lambda _value: self._sync_lower_third_timing_labels(),
             bg=self.palette["card"],
+            troughcolor=self.palette["bg_alt"],
+            activebackground=self.palette["accent"],
             highlightthickness=0,
         )
         self.download_lower_third_display_duration_scale.grid(
@@ -1416,83 +1501,6 @@ class TranscriptApp:
             sticky="ew",
         )
 
-        value_add_row = tk.Frame(self.options_body, bg=self.palette["card"])
-        value_add_row.grid(row=18, column=0, sticky="w", pady=(10, 0))
-        ttk.Label(
-            value_add_row,
-            text="Valeur ajoutée",
-            style="Card.TLabel",
-        ).grid(row=0, column=0, sticky="w", pady=(0, 4))
-        self.download_intro_outro_check = ttk.Checkbutton(
-            value_add_row,
-            text="Intro / Outro",
-            variable=self.download_intro_outro_enabled_var,
-            style="Card.TCheckbutton",
-        )
-        self.download_intro_outro_check.grid(row=1, column=0, sticky="w")
-        self.download_progress_bar_check = ttk.Checkbutton(
-            value_add_row,
-            text="Barre de progression",
-            variable=self.download_progress_bar_enabled_var,
-            style="Card.TCheckbutton",
-        )
-        self.download_progress_bar_check.grid(row=2, column=0, sticky="w", pady=(4, 0))
-        self.download_animated_watermark_check = ttk.Checkbutton(
-            value_add_row,
-            text="Filigrane animé",
-            variable=self.download_animated_watermark_enabled_var,
-            style="Card.TCheckbutton",
-        )
-        self.download_animated_watermark_check.grid(
-            row=3,
-            column=0,
-            sticky="w",
-            pady=(4, 0),
-        )
-
-        self.download_subtitles_check = ttk.Checkbutton(
-            self.options_body,
-            text="Ajouter sous-titres",
-            variable=self.download_subtitles_enabled_var,
-            style="Card.TCheckbutton",
-        )
-        self.download_subtitles_check.grid(row=19, column=0, sticky="w", pady=(10, 0))
-
-        subtitle_style_row = tk.Frame(self.options_body, bg=self.palette["card"])
-        subtitle_style_row.grid(row=20, column=0, sticky="w", pady=(8, 0))
-        ttk.Label(
-            subtitle_style_row,
-            text="Design sous-titres",
-            style="Card.TLabel",
-        ).grid(row=0, column=0, sticky="w")
-        self.download_subtitle_style_combo = ttk.Combobox(
-            subtitle_style_row,
-            textvariable=self.download_subtitle_style_var,
-            values=list(self.download_subtitle_style_lookup.keys()),
-            state="readonly",
-            width=16,
-        )
-        self.download_subtitle_style_combo.grid(
-            row=0, column=1, sticky="w", padx=(10, 0)
-        )
-
-        video_effect_row = tk.Frame(self.options_body, bg=self.palette["card"])
-        video_effect_row.grid(row=21, column=0, sticky="w", pady=(8, 0))
-        ttk.Label(
-            video_effect_row,
-            text="Effet vidéo",
-            style="Card.TLabel",
-        ).grid(row=0, column=0, sticky="w")
-        self.download_video_effect_combo = ttk.Combobox(
-            video_effect_row,
-            textvariable=self.download_video_effect_var,
-            values=list(self.download_video_effect_lookup.keys()),
-            state="readonly",
-            width=16,
-        )
-        self.download_video_effect_combo.grid(
-            row=0, column=1, sticky="w", padx=(10, 0)
-        )
         self._update_download_logo_controls_state()
         self._update_lower_third_controls_state()
         self._redraw_logo_preview()
@@ -1617,13 +1625,20 @@ class TranscriptApp:
             moments_header, text="", style="CardMuted.TLabel"
         )
         self.moments_count_label.grid(row=0, column=1, sticky="e", padx=(0, 10))
+        self.copy_chapters_button = self._button(
+            moments_header,
+            text="Copier chapitres",
+            command=self._copy_youtube_chapters,
+            variant="tertiary",
+        )
+        self.copy_chapters_button.grid(row=0, column=2, sticky="e", padx=(0, 8))
         self.download_clips_button = self._button(
             moments_header,
             text="Télécharger extraits",
             command=self.download_clips,
             variant="secondary",
         )
-        self.download_clips_button.grid(row=0, column=2, sticky="e")
+        self.download_clips_button.grid(row=0, column=3, sticky="e")
 
         self.moments_canvas = tk.Canvas(
             moments_card,
@@ -1767,6 +1782,60 @@ class TranscriptApp:
             self.options_body.grid()
             self.options_toggle_button.configure(text="Masquer ▴")
             self.options_visible = True
+        self._refresh_options_badge()
+
+    def _count_active_options(self) -> int:
+        count = 0
+        if self.download_logo_enabled_var.get() and self._current_download_logo_path():
+            count += 1
+        if self.download_lower_third_enabled_var.get():
+            count += 1
+        if self.download_subtitles_enabled_var.get():
+            count += 1
+        if self.download_intro_outro_enabled_var.get():
+            count += 1
+        if self.download_progress_bar_enabled_var.get():
+            count += 1
+        if self.download_animated_watermark_enabled_var.get():
+            count += 1
+        if self.download_video_effect_var.get() not in ("Aucun", "none", ""):
+            count += 1
+        if self.download_aspect_ratio_var.get() != "Normal 16:9":
+            count += 1
+        return count
+
+    def _refresh_options_badge(self) -> None:
+        n = self._count_active_options()
+        badge = f" ({n} active{'s' if n > 1 else ''})" if n > 0 else ""
+        label = "Masquer ▴" if self.options_visible else "Afficher ▾"
+        self.options_toggle_button.configure(text=f"{label}{badge}")
+
+    def _update_config_summary(self) -> None:
+        parts: list[str] = []
+        aspect = self.download_aspect_ratio_var.get()
+        parts.append(aspect)
+        if self.download_logo_enabled_var.get() and self._current_download_logo_path():
+            try:
+                dur = int(self.download_logo_duration_var.get())
+            except (TypeError, ValueError):
+                dur = 0
+            parts.append(f"Logo{f' {dur}s' if dur > 0 else ''}")
+        if self.download_lower_third_enabled_var.get():
+            name = self.download_lower_third_name_var.get().strip()
+            parts.append(f"Lower third{f': {name}' if name else ''}")
+        if self.download_subtitles_enabled_var.get():
+            style = self.download_subtitle_style_var.get()
+            parts.append(f"Sous-titres: {style}")
+        effect = self.download_video_effect_var.get()
+        if effect and effect not in ("Aucun", "none"):
+            parts.append(effect)
+        if self.download_intro_outro_enabled_var.get():
+            parts.append("Intro/Outro")
+        if self.download_progress_bar_enabled_var.get():
+            parts.append("Progression")
+        summary = " · ".join(parts)
+        self.config_summary_var.set(summary)
+        self._refresh_options_badge()
 
     def _on_moments_configure(self, event: tk.Event) -> None:
         self.moments_canvas.configure(scrollregion=self.moments_canvas.bbox("all"))
@@ -2540,16 +2609,19 @@ class TranscriptApp:
 
     def _on_download_preferences_change(self, *_: object) -> None:
         self._redraw_logo_preview()
+        self._update_config_summary()
         self._save_gui_settings()
 
     def _on_value_add_change(self, *_: object) -> None:
         self._update_value_add_controls_state()
         self._update_download_logo_controls_state()
         self._update_lower_third_controls_state()
+        self._update_config_summary()
         self._save_gui_settings()
 
     def _on_lower_third_change(self, *_: object) -> None:
         self._update_lower_third_controls_state()
+        self._update_config_summary()
         self._save_gui_settings()
 
     def _on_lower_third_color_change(self, *_: object) -> None:
@@ -2562,6 +2634,13 @@ class TranscriptApp:
 
     def _on_download_aspect_change(self, *_: object) -> None:
         self._redraw_logo_preview()
+        self._update_config_summary()
+        # Le fond flouté n'est pertinent qu'en mode Shorts
+        if hasattr(self, "download_shorts_blur_check"):
+            is_shorts = self._selected_download_aspect_mode() == "shorts"
+            self.download_shorts_blur_check.configure(
+                state="normal" if is_shorts else "disabled"
+            )
         self._save_gui_settings()
 
     def _on_download_logo_position_change(self, *_: object) -> None:
@@ -2633,6 +2712,83 @@ class TranscriptApp:
 
     def _on_download_logo_focus_out(self, _event: tk.Event) -> None:
         self._save_gui_settings()
+
+    def _fetch_lower_third_from_url(self) -> None:
+        url = self.last_url or self._get_entry_value(self.url_entry)
+        if not url:
+            messagebox.showwarning("Aucune URL", "Ajoute d'abord une URL vidéo.")
+            return
+        yt_dlp_cmd = self._resolve_yt_dlp_cmd()
+        if not yt_dlp_cmd:
+            messagebox.showerror("yt-dlp manquant", "yt-dlp est requis pour récupérer les métadonnées.")
+            return
+        btn = getattr(self, "download_lower_third_fetch_button", None)
+        if btn:
+            btn.configure(state="disabled", text="…")
+
+        def _do_fetch() -> None:
+            cmd = [
+                *yt_dlp_cmd,
+                "--no-playlist", "--skip-download",
+                "--print", "%(channel)s",
+                "--print", "%(title)s",
+                url,
+            ]
+            try:
+                result = subprocess.run(
+                    cmd, check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    text=True, timeout=25,
+                )
+                lines = [ln.strip() for ln in result.stdout.splitlines() if ln.strip()]
+                channel = lines[0] if len(lines) > 0 else ""
+                title = lines[1] if len(lines) > 1 else ""
+            except Exception:
+                channel = ""
+                title = ""
+            self.master.after(0, self._apply_lower_third_metadata, channel, title)
+
+        threading.Thread(target=_do_fetch, daemon=True).start()
+
+    def _apply_lower_third_metadata(self, channel: str, title: str) -> None:
+        btn = getattr(self, "download_lower_third_fetch_button", None)
+        if btn:
+            btn.configure(state="normal", text="Récupérer ↓")
+        if not channel and not title:
+            messagebox.showwarning(
+                "Métadonnées indisponibles",
+                "Impossible de récupérer les informations de la vidéo.",
+            )
+            return
+        if channel:
+            self.download_lower_third_name_var.set(channel)
+        if title:
+            tagline = title[:52] + "…" if len(title) > 52 else title
+            self.download_lower_third_tagline_var.set(tagline)
+
+    def _on_intro_outro_toggle(self) -> None:
+        panel = getattr(self, "download_intro_outro_options", None)
+        if panel is None:
+            return
+        if self.download_intro_outro_enabled_var.get():
+            panel.grid()
+        else:
+            panel.grid_remove()
+
+    def _pick_intro_outro_color(self, var: tk.StringVar, swatch: tk.Label) -> None:
+        color = colorchooser.askcolor(color=var.get())[1]
+        if color:
+            var.set(color)
+            try:
+                swatch.configure(bg=color)
+            except tk.TclError:
+                pass
+
+    def _hex_to_ffmpeg_color(self, hex_color: str, opacity: float = 0.55) -> str:
+        color = str(hex_color or "#000000").strip().lstrip("#")
+        if len(color) == 6:
+            return f"0x{color}@{opacity}"
+        return "0x000000@0.55"
 
     def _pick_lower_third_color(self, var: tk.StringVar) -> None:
         color = colorchooser.askcolor(color=var.get())[1]
@@ -2710,9 +2866,18 @@ class TranscriptApp:
                 )
                 return None
 
+        try:
+            hold = max(0.5, float(getattr(self, "download_intro_outro_hold_var", None) and self.download_intro_outro_hold_var.get() or 1.5))
+        except (TypeError, ValueError):
+            hold = 1.5
+        bg_hex = str(getattr(self, "download_intro_outro_bg_color_var", None) and self.download_intro_outro_bg_color_var.get() or "#000000")
+        text_hex = str(getattr(self, "download_intro_outro_text_color_var", None) and self.download_intro_outro_text_color_var.get() or "#FFFFFF")
         return {
             "intro_outro_enabled": intro_outro_enabled,
             "intro_outro_channel_name": channel_name,
+            "intro_outro_hold_duration": hold,
+            "intro_outro_bg_color": self._hex_to_ffmpeg_color(bg_hex, 0.75),
+            "intro_outro_text_color": text_hex,
             "progress_bar_enabled": progress_bar_enabled,
             "animated_watermark_enabled": animated_watermark_enabled,
             "watermark_logo_path": watermark_logo_path,
@@ -2842,6 +3007,12 @@ class TranscriptApp:
                 else True
             ),
             video_format=video_format,
+            position=(
+                "top"
+                if getattr(self, "download_lower_third_position_var", None) is not None
+                and self.download_lower_third_position_var.get() == "Haut"
+                else "bottom"
+            ),
         )
 
     @staticmethod
@@ -3209,6 +3380,22 @@ class TranscriptApp:
         else:
             self._set_status(f"Script enregistré dans {file_path}.", busy=False)
 
+    def _copy_youtube_chapters(self) -> None:
+        if not self.last_most_viewed_moments:
+            messagebox.showinfo(
+                "Aucun moment détecté",
+                "Transcris une vidéo d'abord pour détecter les moments forts.",
+            )
+            return
+        lines = ["0:00 Introduction"]
+        for moment in self.last_most_viewed_moments:
+            ts = seconds_to_timestamp(moment.minute_index * 60)
+            excerpt = moment.excerpt[:60].strip().rstrip("…").rstrip(".")
+            lines.append(f"{ts} {excerpt}")
+        self.master.clipboard_clear()
+        self.master.clipboard_append("\n".join(lines))
+        self._set_status("Chapitres YouTube copiés ✓", busy=False, success=True)
+
     def export_moments(self) -> None:
         if not self.last_most_viewed_moments:
             messagebox.showinfo(
@@ -3468,6 +3655,7 @@ class TranscriptApp:
             ),
             "subtitles_enabled": subtitles_enabled,
             "subtitle_style": self._selected_download_subtitle_style(),
+            "subtitle_offset_ms": self._get_subtitle_offset_ms(),
             "subtitle_chunks": copy.deepcopy(self.last_transcript_chunks)
             if subtitles_enabled
             else [],
@@ -3633,12 +3821,17 @@ class TranscriptApp:
                 )
             ),
             "logo_opacity_percent": int(item.get("logo_opacity_percent", 100)),
+            "logo_display_duration": item.get("logo_display_duration") or None,
+            "shorts_blur_bg": bool(item.get("shorts_blur_bg", True)),
             "lower_third_config": item.get("lower_third_config"),
             "clip_duration": float(item.get("duration", 0) or 0),
             "intro_outro_enabled": bool(item.get("intro_outro_enabled", False)),
             "intro_outro_channel_name": str(
                 item.get("intro_outro_channel_name", "")
             ),
+            "intro_outro_hold_duration": float(item.get("intro_outro_hold_duration", 1.5) or 1.5),
+            "intro_outro_bg_color": str(item.get("intro_outro_bg_color", "0x000000@0.75") or "0x000000@0.75"),
+            "intro_outro_text_color": str(item.get("intro_outro_text_color", "#FFFFFF") or "#FFFFFF"),
             "progress_bar_enabled": bool(item.get("progress_bar_enabled", False)),
             "animated_watermark_enabled": bool(
                 item.get("animated_watermark_enabled", False)
@@ -3664,6 +3857,7 @@ class TranscriptApp:
                     "subtitle_chunks": item.get("subtitle_chunks", []),
                     "subtitle_start": float(item.get("start", 0) or 0),
                     "subtitle_duration": float(item.get("duration", 0) or 0),
+                    "subtitle_offset_ms": int(item.get("subtitle_offset_ms", 0) or 0),
                     "subtitle_style": str(item.get("subtitle_style", "impact")),
                 }
             )
@@ -3957,6 +4151,8 @@ class TranscriptApp:
             "logo_size_mode": config.size_mode,
             "logo_scale_percent": int(round(config.slider_value)),
             "logo_opacity_percent": int(round(config.opacity * 100)),
+            "logo_display_duration": self._get_download_logo_duration(),
+            "shorts_blur_bg": bool(getattr(self, "download_shorts_blur_var", None) and self.download_shorts_blur_var.get()),
             "logo_width_ratio": self._get_download_logo_width_ratio(),
             "logo_x_ratio": self._get_download_logo_x_ratio(),
             "logo_y_ratio": self._get_download_logo_y_ratio(),
@@ -3981,6 +4177,8 @@ class TranscriptApp:
             "logo_size_mode": self._selected_download_logo_size_mode(),
             "logo_scale_percent": self._get_download_logo_scale_percent(),
             "logo_opacity_percent": self._get_download_logo_opacity_percent(),
+            "logo_display_duration": self._get_download_logo_duration(),
+            "shorts_blur_bg": bool(getattr(self, "download_shorts_blur_var", None) and self.download_shorts_blur_var.get()),
             "logo_width_ratio": self._get_download_logo_width_ratio(),
             "logo_x_ratio": self._get_download_logo_x_ratio(),
             "logo_y_ratio": self._get_download_logo_y_ratio(),
@@ -4170,6 +4368,21 @@ class TranscriptApp:
         except (TypeError, ValueError):
             return 100
         return max(10, min(100, value))
+
+    def _get_download_logo_duration(self) -> float | None:
+        var = getattr(self, "download_logo_duration_var", None)
+        try:
+            value = int(var.get()) if var is not None else 0
+        except (TypeError, ValueError, AttributeError):
+            return None
+        return float(value) if value > 0 else None
+
+    def _get_subtitle_offset_ms(self) -> int:
+        var = getattr(self, "download_subtitle_offset_var", None)
+        try:
+            return int(var.get()) if var is not None else 0
+        except (TypeError, ValueError, AttributeError):
+            return 0
 
     def _selected_download_logo_position(self) -> str:
         label = self.download_logo_position_var.get()
@@ -4439,16 +4652,22 @@ class TranscriptApp:
         logo_y_ratio: float = download_utils.DEFAULT_LOGO_Y_RATIO,
         logo_original_width: int | None = None,
         logo_original_height: int | None = None,
+        logo_display_duration: float | None = None,
+        shorts_blur_bg: bool = True,
         lower_third_config: lower_third.LowerThirdConfig | None = None,
         lower_third_interval: int = lower_third.DEFAULT_DISPLAY_INTERVAL_SECONDS,
         lower_third_display_duration: int = lower_third.DEFAULT_DISPLAY_DURATION_SECONDS,
         intro_outro_enabled: bool = False,
         intro_outro_channel_name: str = "",
+        intro_outro_hold_duration: float = 1.5,
+        intro_outro_bg_color: str = "0x000000@0.75",
+        intro_outro_text_color: str = "#FFFFFF",
         progress_bar_enabled: bool = False,
         animated_watermark_enabled: bool = False,
         watermark_logo_path: str = "",
         subtitles_enabled: bool = False,
         subtitle_style: str = "impact",
+        subtitle_offset_ms: int = 0,
         video_effect: str = "none",
     ) -> None:
         subtitles_allowed = subtitles_enabled and url == getattr(self, "last_url", "")
@@ -4484,16 +4703,22 @@ class TranscriptApp:
                     "logo_y_ratio": logo_y_ratio,
                     "logo_original_width": logo_original_width,
                     "logo_original_height": logo_original_height,
+                    "logo_display_duration": logo_display_duration,
+                    "shorts_blur_bg": shorts_blur_bg,
                     "lower_third_config": copy.deepcopy(lower_third_config),
                     "lower_third_interval": lower_third_interval,
                     "lower_third_display_duration": lower_third_display_duration,
                     "intro_outro_enabled": intro_outro_enabled,
                     "intro_outro_channel_name": intro_outro_channel_name,
+                    "intro_outro_hold_duration": intro_outro_hold_duration if hasattr(self, "download_intro_outro_hold_var") else 1.5,
+                    "intro_outro_bg_color": intro_outro_bg_color if hasattr(self, "download_intro_outro_bg_color_var") else "0x000000@0.75",
+                    "intro_outro_text_color": intro_outro_text_color if hasattr(self, "download_intro_outro_text_color_var") else "#FFFFFF",
                     "progress_bar_enabled": progress_bar_enabled,
                     "animated_watermark_enabled": animated_watermark_enabled,
                     "watermark_logo_path": watermark_logo_path,
                     "subtitles_enabled": bool(transcript_chunks),
                     "subtitle_style": subtitle_style,
+                    "subtitle_offset_ms": subtitle_offset_ms,
                     "subtitle_chunks": transcript_chunks,
                     "video_effect": video_effect,
                     "clip_label": clip_label,
@@ -4543,11 +4768,16 @@ class TranscriptApp:
         logo_y_ratio: float = download_utils.DEFAULT_LOGO_Y_RATIO,
         logo_original_width: int | None = None,
         logo_original_height: int | None = None,
+        logo_display_duration: float | None = None,
+        shorts_blur_bg: bool = True,
         lower_third_config: lower_third.LowerThirdConfig | None = None,
         lower_third_interval: int = lower_third.DEFAULT_DISPLAY_INTERVAL_SECONDS,
         lower_third_display_duration: int = lower_third.DEFAULT_DISPLAY_DURATION_SECONDS,
         intro_outro_enabled: bool = False,
         intro_outro_channel_name: str = "",
+        intro_outro_hold_duration: float = 1.5,
+        intro_outro_bg_color: str = "0x000000@0.75",
+        intro_outro_text_color: str = "#FFFFFF",
         progress_bar_enabled: bool = False,
         animated_watermark_enabled: bool = False,
         watermark_logo_path: str = "",
@@ -4606,6 +4836,8 @@ class TranscriptApp:
                 "logo_y_ratio": logo_y_ratio,
                 "logo_original_width": logo_original_width if media_logo_enabled else None,
                 "logo_original_height": logo_original_height if media_logo_enabled else None,
+                "logo_display_duration": logo_display_duration,
+                "shorts_blur_bg": shorts_blur_bg,
                 "lower_third_config": media_lower_third_config,
                 "lower_third_interval": lower_third_interval,
                 "lower_third_display_duration": lower_third_display_duration,
@@ -4613,6 +4845,9 @@ class TranscriptApp:
                 "intro_outro_channel_name": intro_outro_channel_name
                 if media_intro_outro_enabled
                 else "",
+                "intro_outro_hold_duration": intro_outro_hold_duration,
+                "intro_outro_bg_color": intro_outro_bg_color,
+                "intro_outro_text_color": intro_outro_text_color,
                 "progress_bar_enabled": media_progress_bar_enabled,
                 "animated_watermark_enabled": media_animated_watermark_enabled,
                 "watermark_logo_path": watermark_logo_path
@@ -4856,6 +5091,8 @@ class TranscriptApp:
                         )
                     ),
                     "logo_opacity_percent": int(item.get("logo_opacity_percent", 100)),
+                    "logo_display_duration": item.get("logo_display_duration") or None,
+            "shorts_blur_bg": bool(item.get("shorts_blur_bg", True)),
                     "lower_third_config": item.get("lower_third_config"),
                     "intro_outro_enabled": bool(
                         item.get("intro_outro_enabled", False)
@@ -4863,6 +5100,9 @@ class TranscriptApp:
                     "intro_outro_channel_name": str(
                         item.get("intro_outro_channel_name", "")
                     ),
+                    "intro_outro_hold_duration": float(item.get("intro_outro_hold_duration", 1.5) or 1.5),
+                    "intro_outro_bg_color": str(item.get("intro_outro_bg_color", "0x000000@0.75") or "0x000000@0.75"),
+                    "intro_outro_text_color": str(item.get("intro_outro_text_color", "#FFFFFF") or "#FFFFFF"),
                     "progress_bar_enabled": bool(
                         item.get("progress_bar_enabled", False)
                     ),
@@ -4890,6 +5130,7 @@ class TranscriptApp:
                             "subtitle_chunks": item.get("subtitle_chunks", []),
                             "subtitle_start": 0.0,
                             "subtitle_duration": None,
+                            "subtitle_offset_ms": int(item.get("subtitle_offset_ms", 0) or 0),
                             "subtitle_style": str(item.get("subtitle_style", "impact")),
                         }
                     )
@@ -5059,12 +5300,17 @@ class TranscriptApp:
                     )
                 ),
                 "logo_opacity_percent": int(item.get("logo_opacity_percent", 100)),
+                "logo_display_duration": item.get("logo_display_duration") or None,
+            "shorts_blur_bg": bool(item.get("shorts_blur_bg", True)),
                 "lower_third_config": item.get("lower_third_config"),
                 "clip_duration": float(item.get("duration", 0) or 0),
                 "intro_outro_enabled": bool(item.get("intro_outro_enabled", False)),
                 "intro_outro_channel_name": str(
                     item.get("intro_outro_channel_name", "")
                 ),
+                "intro_outro_hold_duration": float(item.get("intro_outro_hold_duration", 1.5) or 1.5),
+                "intro_outro_bg_color": str(item.get("intro_outro_bg_color", "0x000000@0.75") or "0x000000@0.75"),
+                "intro_outro_text_color": str(item.get("intro_outro_text_color", "#FFFFFF") or "#FFFFFF"),
                 "progress_bar_enabled": bool(item.get("progress_bar_enabled", False)),
                 "animated_watermark_enabled": bool(
                     item.get("animated_watermark_enabled", False)
@@ -5090,6 +5336,7 @@ class TranscriptApp:
                         "subtitle_chunks": item.get("subtitle_chunks", []),
                         "subtitle_start": float(item.get("start", 0) or 0),
                         "subtitle_duration": float(item.get("duration", 0) or 0),
+                        "subtitle_offset_ms": int(item.get("subtitle_offset_ms", 0) or 0),
                         "subtitle_style": str(item.get("subtitle_style", "impact")),
                     }
                 )
@@ -5194,7 +5441,7 @@ class TranscriptApp:
         candidates = [
             path
             for path in output_dir.glob(f"*.{video_format}")
-            if path.is_file()
+            if path.is_file() and path.stat().st_size > 0
         ]
         if not candidates:
             candidates = [
@@ -5202,6 +5449,7 @@ class TranscriptApp:
                 for path in output_dir.iterdir()
                 if path.is_file()
                 and path.suffix.lower() in download_utils.COMMON_VIDEO_EXTENSIONS
+                and path.stat().st_size > 0
             ]
         if not candidates:
             return None
@@ -5229,11 +5477,15 @@ class TranscriptApp:
         subtitle_chunks: List[dict] | None = None,
         subtitle_start: float = 0.0,
         subtitle_duration: float | None = None,
+        subtitle_offset_ms: int = 0,
         clip_duration: float | None = None,
         lower_third_interval: float = lower_third.DEFAULT_DISPLAY_INTERVAL_SECONDS,
         lower_third_display_duration: float = lower_third.DEFAULT_DISPLAY_DURATION_SECONDS,
         intro_outro_enabled: bool = False,
         intro_outro_channel_name: str = "",
+        intro_outro_hold_duration: float = 1.5,
+        intro_outro_bg_color: str = "0x000000@0.75",
+        intro_outro_text_color: str = "#FFFFFF",
         progress_bar_enabled: bool = False,
         animated_watermark_enabled: bool = False,
         watermark_logo_path: str = "",
@@ -5241,6 +5493,8 @@ class TranscriptApp:
         video_effect: str = "none",
         lower_third_config: lower_third.LowerThirdConfig | None = None,
         preview_width: int | None = None,
+        logo_display_duration: float | None = None,
+        shorts_blur_bg: bool = True,
     ) -> Path:
         ffmpeg_path = self._resolve_system_tool("ffmpeg")
         if ffmpeg_path is None:
@@ -5264,11 +5518,15 @@ class TranscriptApp:
             subtitle_chunks=subtitle_chunks,
             subtitle_start=subtitle_start,
             subtitle_duration=subtitle_duration,
+            subtitle_offset_ms=subtitle_offset_ms,
             clip_duration=clip_duration,
             lower_third_interval=lower_third_interval,
             lower_third_display_duration=lower_third_display_duration,
             intro_outro_enabled=intro_outro_enabled,
             intro_outro_channel_name=intro_outro_channel_name,
+            intro_outro_hold_duration=intro_outro_hold_duration,
+            intro_outro_bg_color=intro_outro_bg_color,
+            intro_outro_text_color=intro_outro_text_color,
             progress_bar_enabled=progress_bar_enabled,
             animated_watermark_enabled=animated_watermark_enabled,
             watermark_logo_path=watermark_logo_path,
@@ -5276,6 +5534,8 @@ class TranscriptApp:
             video_effect=video_effect,
             lower_third_config=lower_third_config,
             preview_width=preview_width,
+            logo_display_duration=logo_display_duration if (logo_display_duration or 0) > 0 else None,
+            shorts_blur_bg=shorts_blur_bg,
         )
         return video_renderer.render_video_variant(options, runner=subprocess.run)
 
@@ -5294,6 +5554,8 @@ class TranscriptApp:
     def _start_download_ui(self, total: int) -> None:
         self._set_busy_state(True)
         self._reset_download_ui()
+        if hasattr(self, "_download_status_shadow"):
+            self._download_status_shadow.grid()
         self.download_overall_progress.configure(maximum=100, value=0)
         self.download_current_progress.configure(maximum=100, value=0)
         self.download_summary_var.set(f"Téléchargement 0/{total} • 0%")
@@ -5325,6 +5587,7 @@ class TranscriptApp:
             self.download_detail_var.set("Téléchargement annulé.")
             self._set_download_phase("annulé par l'utilisateur")
             self._append_download_log("Téléchargement annulé.")
+            self.master.after(3000, self._hide_download_status)
             return
         if success:
             self._set_status(
@@ -5333,12 +5596,20 @@ class TranscriptApp:
             self.download_detail_var.set("✔ Téléchargement terminé · 📁 Fichier prêt")
             self._set_download_phase("terminé")
             self._append_download_log("Téléchargements terminés.")
+            self.master.after(5000, self._hide_download_status)
         else:
             self._set_status("Erreur lors du téléchargement.", busy=False, error=True)
             self.download_detail_var.set("Erreur lors du téléchargement.")
             self._set_download_phase("échec")
             if message:
                 messagebox.showerror("Téléchargement impossible", message)
+            self.master.after(8000, self._hide_download_status)
+
+    def _hide_download_status(self) -> None:
+        if self.download_active:
+            return
+        if hasattr(self, "_download_status_shadow"):
+            self._download_status_shadow.grid_remove()
 
     def copy_to_clipboard(self) -> None:
         content = self.output_text.get("1.0", tk.END).strip()

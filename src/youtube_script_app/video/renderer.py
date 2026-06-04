@@ -20,6 +20,10 @@ VIDEO_ENCODER_PRESET = "slow"
 VIDEO_ENCODER_CRF = "14"
 AUDIO_ENCODER_BITRATE = "256k"
 SCALE_FLAGS = "lanczos+accurate_rnd+full_chroma_int"
+# Upscaling below this short edge. Set to 0 to disable forced upscale.
+# Forcing 360p → 1080p adds no real detail and degrades perceived quality.
+MIN_FULL_HD_SHORT_EDGE = 0
+VIDEO_SHARPEN_FILTER = "unsharp=5:5:0.45:5:5:0.0"
 LOWER_THIRD_SLIDE_DURATION = 0.4
 
 
@@ -41,11 +45,15 @@ class VideoRenderOptions:
     subtitle_chunks: Sequence[dict] | None = None
     subtitle_start: float = 0.0
     subtitle_duration: float | None = None
+    subtitle_offset_ms: int = 0
     clip_duration: float | None = None
     lower_third_interval: float = lower_third.DEFAULT_DISPLAY_INTERVAL_SECONDS
     lower_third_display_duration: float = lower_third.DEFAULT_DISPLAY_DURATION_SECONDS
     intro_outro_enabled: bool = False
     intro_outro_channel_name: str = ""
+    intro_outro_hold_duration: float = 1.5
+    intro_outro_bg_color: str = "0x000000@0.55"
+    intro_outro_text_color: str = "white"
     progress_bar_enabled: bool = False
     animated_watermark_enabled: bool = False
     watermark_logo_path: str = ""
@@ -53,6 +61,8 @@ class VideoRenderOptions:
     video_effect: str = "none"
     lower_third_config: lower_third.LowerThirdConfig | None = None
     preview_width: int | None = None
+    logo_display_duration: float | None = None  # None = visible toute la vidéo
+    shorts_blur_bg: bool = True  # fond flouté pillarbox pour les Shorts
 
 
 @dataclass(frozen=True)
@@ -73,6 +83,7 @@ class LogoRenderConfig:
     x_px: int
     y_px: int
     opacity: float
+    duration: float | None = None  # None = toujours visible
 
 
 @dataclass(frozen=True)
@@ -92,6 +103,9 @@ class IntroOutroRenderConfig:
     channel_name: str
     video_width: int
     video_height: int
+    hold_duration: float = 1.5
+    bg_color: str = "0x000000@0.55"
+    text_color: str = "white"
 
 
 @dataclass(frozen=True)
@@ -284,16 +298,34 @@ def _probe_media_duration(ffmpeg_path: str, path: Path) -> float | None:
     return duration if duration > 0 else None
 
 
-def _base_video_size(options: VideoRenderOptions) -> tuple[int, int]:
+def _minimum_full_hd_size(width: int, height: int) -> tuple[int, int]:
+    short_edge = min(width, height)
+    if short_edge >= MIN_FULL_HD_SHORT_EDGE:
+        return width, height
+    scale_factor = MIN_FULL_HD_SHORT_EDGE / short_edge
+    return _even_dimension(width * scale_factor), _even_dimension(height * scale_factor)
+
+
+def _base_video_geometry(options: VideoRenderOptions) -> tuple[int, int, bool]:
+    upscale_to_full_hd = False
     if options.to_shorts:
         width, height = 1080, 1920
     else:
         probed = _probe_media_size(options.ffmpeg_path, Path(options.input_path))
         width, height = probed if probed is not None else (1920, 1080)
+        if probed is not None and not options.preview_width:
+            target_width, target_height = _minimum_full_hd_size(width, height)
+            upscale_to_full_hd = (target_width, target_height) != (width, height)
+            width, height = target_width, target_height
     if options.preview_width:
         preview_width = max(240, min(1080, int(options.preview_width)))
         height = _even_dimension(preview_width * (height / width))
         width = preview_width
+    return width, height, upscale_to_full_hd
+
+
+def _base_video_size(options: VideoRenderOptions) -> tuple[int, int]:
+    width, height, _upscale_to_full_hd = _base_video_geometry(options)
     return width, height
 
 
@@ -381,22 +413,60 @@ def _watermark_overlay_geometry(
     return logo_width, max(0, min(x, video_width - logo_width)), max(0, y)
 
 
-def _build_base_video_filters(to_shorts: bool, preview_width: int | None) -> List[str]:
+def _build_base_video_filters(
+    to_shorts: bool,
+    preview_width: int | None,
+    *,
+    upscale_width: int | None = None,
+    upscale_height: int | None = None,
+    blur_bg: bool = False,
+) -> List[str]:
     filters: List[str] = []
-    if to_shorts:
+    if to_shorts and not blur_bg:
+        # blur_bg uses a split/overlay approach handled in build_filter_complex
         filters.append(
             f"scale=1080:1920:force_original_aspect_ratio=increase:flags={SCALE_FLAGS}"
         )
         filters.append("crop=1080:1920")
+    elif upscale_width and upscale_height:
+        filters.append(f"scale={upscale_width}:{upscale_height}:flags={SCALE_FLAGS}")
     if preview_width:
         width = max(240, min(1080, int(preview_width)))
         filters.append(f"scale={width}:-2:flags={SCALE_FLAGS}")
+    filters.append(VIDEO_SHARPEN_FILTER)
     return filters
 
 
 def _called_process_message(error: subprocess.CalledProcessError) -> str:
-    details = (error.stderr or "").strip().splitlines()
-    return details[-1] if details else "Le traitement du clip a échoué."
+    raw = (error.stderr or "").strip()
+    lines = [line for line in raw.splitlines() if line.strip()]
+    if not lines:
+        return "Le traitement du clip a échoué."
+
+    # Prefer the first line that contains a specific FFmpeg diagnostic over
+    # the generic terminal summary ("Error opening input files: …").
+    priority_keywords = (
+        "moov atom not found",
+        "Invalid data found",
+        "no such file",
+        "permission denied",
+        "codec not found",
+        "unknown encoder",
+        "could not find tag",
+        "error while opening",
+        "not found",
+    )
+    for line in reversed(lines):
+        lower = line.lower()
+        for keyword in priority_keywords:
+            if keyword in lower:
+                # Append the last line too if it adds context
+                last = lines[-1]
+                if last != line and last not in line:
+                    return f"{line.strip()} — {last.strip()}"
+                return line.strip()
+
+    return lines[-1]
 
 
 def _filter_number(value: float) -> str:
@@ -477,23 +547,32 @@ def build_intro_outro_filter(
     video_height: int,
     fade_duration: float = 0.5,
     hold_duration: float = 1.5,
+    bg_color: str = "0x000000@0.55",
+    text_color: str = "white",
 ) -> str:
     duration = _coerce_positive_duration(clip_duration) or 0.0
     fade_duration = min(max(0.1, float(fade_duration)), max(0.1, duration / 2))
     hold_duration = min(max(0.1, float(hold_duration)), max(0.1, duration))
     fade_out_start = max(0.0, duration - fade_duration)
     font_size = max(18, int(video_height * 0.06))
+    shadow_px = max(2, int(video_height * 0.004))
+    box_h = max(60, int(video_height * 0.16))
+    box_y = (video_height - box_h) // 2
+    hold_txt = _filter_number(hold_duration)
+    safe_bg = str(bg_color).strip() or "0x000000@0.55"
+    safe_text = str(text_color).strip() or "white"
     return (
         f"fade=t=in:st=0:d={_filter_number(fade_duration)},"
         f"fade=t=out:st={_filter_number(fade_out_start)}:d={_filter_number(fade_duration)},"
+        f"drawbox=x=0:y={box_y}:w={video_width}:h={box_h}:color={safe_bg}:t=fill:enable='lt(t,{hold_txt})',"
         "drawtext="
         f"text='{_escape_drawtext_text(channel_name)}':"
         f"fontsize={font_size}:"
-        "fontcolor=white:"
+        f"fontcolor={safe_text}:"
         "x=(W-text_w)/2:"
         "y=(H-text_h)/2:"
-        f"alpha='if(lt(t,{_filter_number(hold_duration)}),1,0)':"
-        "shadowcolor=black:shadowx=2:shadowy=2"
+        f"alpha='if(lt(t,{hold_txt}),1,0)':"
+        f"shadowcolor=black:shadowx={shadow_px}:shadowy={shadow_px}"
     )
 
 
@@ -531,6 +610,7 @@ def build_filter_complex(
     lower_third_duration: float | None = None,
     lower_third_interval: float = lower_third.DEFAULT_DISPLAY_INTERVAL_SECONDS,
     lower_third_display_duration: float = lower_third.DEFAULT_DISPLAY_DURATION_SECONDS,
+    shorts_blur_bg: bool = False,
 ) -> tuple[str, list[str]]:
     """Build the ffmpeg filter graph in the order: effect, base, logo, lower third, subtitles."""
     stages: list[str] = []
@@ -545,6 +625,20 @@ def build_filter_complex(
         stages.append(f"{current}{effect_filter}[effected]")
         current = "[effected]"
 
+    if shorts_blur_bg:
+        # Pillarbox: blurred background + original video centred, no crop
+        stages.append(f"{current}split[_bg_raw][_fg_raw]")
+        stages.append(
+            f"[_bg_raw]scale=1080:1920:force_original_aspect_ratio=increase:flags={SCALE_FLAGS},"
+            f"crop=1080:1920,gblur=sigma=20[_bg_blurred]"
+        )
+        stages.append(
+            f"[_fg_raw]scale=1080:1920:force_original_aspect_ratio=decrease:flags={SCALE_FLAGS},"
+            "setsar=1[_fg_sized]"
+        )
+        stages.append("[_bg_blurred][_fg_sized]overlay=(W-w)/2:(H-h)/2[_shorts_comp]")
+        current = "[_shorts_comp]"
+
     if base_filters:
         stages.append(f"{current}{','.join(base_filters)}[base]")
         current = "[base]"
@@ -555,6 +649,9 @@ def build_filter_complex(
             intro_outro_config.channel_name,
             intro_outro_config.video_width,
             intro_outro_config.video_height,
+            hold_duration=intro_outro_config.hold_duration,
+            bg_color=intro_outro_config.bg_color,
+            text_color=intro_outro_config.text_color,
         )
         stages.append(f"{current}{intro_outro_filter}[introoutro]")
         current = "[introoutro]"
@@ -577,7 +674,7 @@ def build_filter_complex(
             f"scale={watermark_config.width_px}:-1:flags={SCALE_FLAGS},"
             "format=rgba,"
             "geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':"
-            "a='alpha(X,Y)*(0.35+0.15*sin(T*0.8))'"
+            "a='alpha(X,Y)*(0.50+0.25*sin(T*1.0))'"
             "[watermark]"
         )
         stages.append(
@@ -588,16 +685,40 @@ def build_filter_complex(
 
     if logo:
         extra_inputs.append(logo.path)
+        shadow_off = max(3, int(logo.width_px * 0.04))
+        shadow_x = max(0, logo.x_px + shadow_off)
+        shadow_y = max(0, logo.y_px + shadow_off)
+        dur_enable = (
+            f":enable='lt(t,{logo.duration:.3f})'"
+            if logo.duration is not None and logo.duration > 0
+            else ""
+        )
+        # Scale + prepare → split into fg (logo) + bg (shadow source)
         stages.append(
             f"[{input_index}:v]"
             f"scale={logo.width_px}:-1:flags={SCALE_FLAGS},"
             "setsar=1,"
             "format=rgba,"
-            f"colorchannelmixer=aa={logo.opacity:.3f}"
-            "[logo]"
+            f"colorchannelmixer=aa={logo.opacity:.3f},"
+            "split[logo_fg][logo_bg]"
+        )
+        # Shadow: darken to black, blur — soft drop shadow
+        stages.append(
+            "[logo_bg]"
+            "geq=r=0:g=0:b=0:a='alpha(X,Y)*0.5',"
+            "gblur=sigma=4"
+            "[logo_shadow]"
+        )
+        # Composite shadow first (offset), then logo on top
+        stages.append(
+            f"{current}[logo_shadow]"
+            f"overlay={shadow_x}:{shadow_y}:format=auto{dur_enable}"
+            "[with_shadow]"
         )
         stages.append(
-            f"{current}[logo]overlay={logo.x_px}:{logo.y_px}:format=auto[withlogo]"
+            f"[with_shadow][logo_fg]"
+            f"overlay={logo.x_px}:{logo.y_px}:format=auto{dur_enable}"
+            "[withlogo]"
         )
         current = "[withlogo]"
         input_index += 1
@@ -668,19 +789,40 @@ def render_video_variant(
     runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
 ) -> Path:
     input_path = Path(options.input_path)
+    if not input_path.exists():
+        raise RuntimeError(
+            f"Fichier introuvable : {input_path.name}\n"
+            "Le téléchargement a peut-être échoué ou le fichier a été déplacé."
+        )
+    if input_path.stat().st_size == 0:
+        raise RuntimeError(
+            f"Fichier vide : {input_path.name}\n"
+            "Le téléchargement est incomplet. Réessaie le téléchargement."
+        )
     has_logo = bool(options.logo_path)
     normalized_effect = subtitle_renderer.normalize_video_effect(options.video_effect)
     normalized_subtitle_style = subtitle_renderer.normalize_subtitle_style(
         options.subtitle_style
     )
-    frame_width, frame_height = _base_video_size(options)
+    frame_width, frame_height, upscale_to_full_hd = _base_video_geometry(options)
     frame_format = "9:16" if frame_height > frame_width else "16:9"
-    subtitle_chunks = subtitle_renderer.rechunk_blocks(
-        options.subtitle_chunks or [],
-        frame_format,
-        clip_start=options.subtitle_start,
-        clip_duration=options.subtitle_duration,
-    )
+    subtitle_offset_sec = (options.subtitle_offset_ms or 0) / 1000.0
+    if normalized_subtitle_style == "word":
+        subtitle_chunks = subtitle_renderer.rechunk_words(
+            options.subtitle_chunks or [],
+            frame_format,
+            clip_start=options.subtitle_start,
+            clip_duration=options.subtitle_duration,
+            offset_sec=subtitle_offset_sec,
+        )
+    else:
+        subtitle_chunks = subtitle_renderer.rechunk_blocks(
+            options.subtitle_chunks or [],
+            frame_format,
+            clip_start=options.subtitle_start,
+            clip_duration=options.subtitle_duration,
+            offset_sec=subtitle_offset_sec,
+        )
     has_subtitles = bool(subtitle_chunks)
     has_lower_third = options.lower_third_config is not None
     render_duration = _coerce_positive_duration(options.clip_duration)
@@ -738,12 +880,20 @@ def render_video_variant(
         return output_path
 
     try:
-        base_filters = _build_base_video_filters(options.to_shorts, options.preview_width)
+        use_blur_bg = options.to_shorts and options.shorts_blur_bg and not options.preview_width
+        base_filters = _build_base_video_filters(
+            options.to_shorts,
+            options.preview_width,
+            upscale_width=frame_width if upscale_to_full_hd else None,
+            upscale_height=frame_height if upscale_to_full_hd else None,
+            blur_bg=use_blur_bg,
+        )
         effect_config = (
             VideoEffectConfig(normalized_effect)
             if normalized_effect != "none"
             else None
         )
+        _logo_dur = options.logo_display_duration
         logo_config = (
             LogoRenderConfig(
                 path=str(Path(options.logo_path)),
@@ -751,6 +901,7 @@ def render_video_variant(
                 x_px=logo_x,
                 y_px=logo_y,
                 opacity=logo_opacity_ratio,
+                duration=_logo_dur if (_logo_dur or 0) > 0 else None,
             )
             if has_logo
             else None
@@ -761,6 +912,9 @@ def render_video_variant(
                 channel_name=str(options.intro_outro_channel_name).strip(),
                 video_width=frame_width,
                 video_height=frame_height,
+                hold_duration=max(0.1, float(options.intro_outro_hold_duration or 1.5)),
+                bg_color=str(options.intro_outro_bg_color or "0x000000@0.55"),
+                text_color=str(options.intro_outro_text_color or "white"),
             )
             if has_intro_outro and render_duration is not None
             else None
@@ -786,6 +940,9 @@ def render_video_variant(
                 x_px=watermark_x,
                 y_px=watermark_y,
             )
+
+        import logging as _logging
+        _render_log = _logging.getLogger("youtube-script")
 
         def _run_render(
             subtitle_path: str | None = None,
@@ -815,6 +972,7 @@ def render_video_variant(
                 ),
                 lower_third_interval=options.lower_third_interval,
                 lower_third_display_duration=options.lower_third_display_duration,
+                shorts_blur_bg=use_blur_bg,
             )
             cmd = build_ffmpeg_command(
                 str(input_path),
@@ -824,13 +982,18 @@ def render_video_variant(
                 ffmpeg_path=options.ffmpeg_path,
                 encode_audio=True,
             )
-            runner(
-                cmd,
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
+            _render_log.info("FFmpeg cmd: %s", " ".join(cmd))
+            try:
+                runner(
+                    cmd,
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            except subprocess.CalledProcessError as _exc:
+                _render_log.error("FFmpeg stderr:\n%s", (_exc.stderr or "").strip())
+                raise
 
         if has_subtitles and has_lower_third:
             assert options.lower_third_config is not None
@@ -869,5 +1032,12 @@ def render_video_variant(
         else:
             _run_render()
     except subprocess.CalledProcessError as error:
+        # Remove the 0-byte output file left by FFmpeg on failure so it is not
+        # mistakenly picked up as the downloaded source on the next attempt.
+        try:
+            if output_path.exists() and output_path.stat().st_size == 0:
+                output_path.unlink()
+        except OSError:
+            pass
         raise RuntimeError(_called_process_message(error)) from error
     return output_path
