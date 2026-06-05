@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import functools
+import re
 import subprocess
 import json
 import shutil
-from dataclasses import dataclass
+import sys
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, List, Sequence
 
@@ -16,9 +19,31 @@ from ..downloads import utils as download_utils
 
 _SUBPROCESS_RUN = subprocess.run
 
-VIDEO_ENCODER_PRESET = "slow"
-VIDEO_ENCODER_CRF = "14"
-AUDIO_ENCODER_BITRATE = "256k"
+
+@functools.lru_cache(maxsize=4)
+def _detect_hw_video_encoder(ffmpeg_path: str) -> tuple[str, list[str]]:
+    """Return (encoder_name, extra_args). Tries VideoToolbox on macOS, falls back to libx264."""
+    if sys.platform == "darwin":
+        try:
+            # _SUBPROCESS_RUN holds the real subprocess.run captured at import time —
+            # unaffected by monkeypatching in tests that mock subprocess.run later.
+            result = _SUBPROCESS_RUN(
+                [
+                    ffmpeg_path, "-f", "lavfi", "-i", "nullsrc=s=2x2:r=1",
+                    "-t", "0.05", "-c:v", "h264_videotoolbox", "-f", "null", "-",
+                ],
+                capture_output=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                return "h264_videotoolbox", ["-q:v", "65", "-pix_fmt", "yuv420p"]
+        except (OSError, subprocess.TimeoutExpired, AttributeError, TypeError):
+            pass
+    return "libx264", ["-preset", VIDEO_ENCODER_PRESET, "-crf", VIDEO_ENCODER_CRF, "-pix_fmt", "yuv420p"]
+
+VIDEO_ENCODER_PRESET = "fast"
+VIDEO_ENCODER_CRF = "18"
+AUDIO_ENCODER_BITRATE = "192k"
 SCALE_FLAGS = "lanczos+accurate_rnd+full_chroma_int"
 # Upscaling below this short edge. Set to 0 to disable forced upscale.
 # Forcing 360p → 1080p adds no real detail and degrades perceived quality.
@@ -95,6 +120,8 @@ class SubtitleRenderConfig:
 @dataclass(frozen=True)
 class LowerThirdRenderConfig:
     path: str
+    position: str = "bottom"
+    band_h_px: int = 0
 
 
 @dataclass(frozen=True)
@@ -298,6 +325,31 @@ def _probe_media_duration(ffmpeg_path: str, path: Path) -> float | None:
     return duration if duration > 0 else None
 
 
+def _probe_audio_codec(ffmpeg_path: str, path: Path) -> str | None:
+    ffprobe_path = _ffprobe_path(ffmpeg_path)
+    if ffprobe_path is None:
+        return None
+    try:
+        result = _SUBPROCESS_RUN(
+            [
+                ffprobe_path,
+                "-v", "error",
+                "-select_streams", "a:0",
+                "-show_entries", "stream=codec_name",
+                "-of", "json",
+                str(path),
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        streams = json.loads(result.stdout or "{}").get("streams", [])
+        return str(streams[0].get("codec_name", "")).lower() if streams else None
+    except (OSError, subprocess.CalledProcessError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
 def _minimum_full_hd_size(width: int, height: int) -> tuple[int, int]:
     short_edge = min(width, height)
     if short_edge >= MIN_FULL_HD_SHORT_EDGE:
@@ -443,24 +495,37 @@ def _called_process_message(error: subprocess.CalledProcessError) -> str:
     if not lines:
         return "Le traitement du clip a échoué."
 
-    # Prefer the first line that contains a specific FFmpeg diagnostic over
-    # the generic terminal summary ("Error opening input files: …").
-    priority_keywords = (
-        "moov atom not found",
-        "Invalid data found",
+    # Lines that start with a bracketed debug tag (e.g. "[mov,mp4 @ 0x...]") are
+    # demuxer/muxer diagnostics and may be warnings, not errors — skip them when
+    # searching for the real failure reason.
+    _BRACKET_TAG_RE = re.compile(r"^\[[\w,.:/ ]+@ 0x[0-9a-f]+\]", re.IGNORECASE)
+
+    # Error lines from filters/encoders start with "Error" or contain these keywords.
+    error_keywords = (
+        "invalid argument",
         "no such file",
         "permission denied",
         "codec not found",
         "unknown encoder",
         "could not find tag",
         "error while opening",
+        "error initializing",
+        "error evaluating",
+        "moov atom not found",
+        "Invalid data found",
         "not found",
     )
+
+    # Prefer lines that look like real errors (not bare demuxer debug tags).
     for line in reversed(lines):
         lower = line.lower()
-        for keyword in priority_keywords:
+        is_debug_tag = bool(_BRACKET_TAG_RE.match(line.strip()))
+        for keyword in error_keywords:
             if keyword in lower:
-                # Append the last line too if it adds context
+                if is_debug_tag and "error" not in lower:
+                    # This is a demuxer warning (e.g. "moov atom not found"),
+                    # not the actual failure — keep scanning.
+                    break
                 last = lines[-1]
                 if last != line and last not in line:
                     return f"{line.strip()} — {last.strip()}"
@@ -507,7 +572,14 @@ def build_lower_third_overlay_options(
     *,
     interval: float = lower_third.DEFAULT_DISPLAY_INTERVAL_SECONDS,
     display_duration: float = lower_third.DEFAULT_DISPLAY_DURATION_SECONDS,
-) -> str:
+    position: str = "bottom",
+    y_offset_px: int = 0,
+) -> tuple[str, str | None]:
+    """Return (overlay_options, fade_expr_or_None).
+
+    For 'top-center': y-slide animation + fade expression.
+    For other positions: x-slide animation, no fade.
+    """
     interval = _clamp_float(
         interval,
         lower_third.DEFAULT_DISPLAY_INTERVAL_SECONDS,
@@ -529,6 +601,23 @@ def build_lower_third_overlay_options(
     slide_duration_text = _filter_number(slide_duration)
     slide_out_start_text = _filter_number(display_duration - slide_duration)
     phase = f"mod(t,{interval_text})"
+
+    if position == "top-center":
+        # Y-slide: band drops from (y_base - h) to y_base, stays, then rises back.
+        # y_offset_px places the band within the pillarbox (0=top, pillarbox_h-band_h=bottom).
+        y_base = str(y_offset_px)
+        y_expression = (
+            f"if(lt({phase},{display_duration_text}),"
+            f"if(lt({phase},{slide_duration_text}),"
+            f"{y_base}-h+{phase}*(h/{slide_duration_text}),"
+            f"if(gt({phase},{slide_out_start_text}),"
+            f"{y_base}-(({phase}-{slide_out_start_text}))*(h/{slide_duration_text}),"
+            f"{y_base})),"
+            f"{y_base}-h)"
+        )
+        return f"x=0:y='{y_expression}':eval=frame:format=auto", None
+
+    # Standard x-slide (bottom / top)
     x_expression = (
         f"if(lt({phase},{display_duration_text}),"
         f"if(lt({phase},{slide_duration_text}),"
@@ -537,7 +626,7 @@ def build_lower_third_overlay_options(
         f"-({phase}-{slide_out_start_text})*(W/{slide_duration_text}),"
         "0)),-W)"
     )
-    return f"x='{x_expression}':y=H-h:format=auto"
+    return f"x='{x_expression}':y=H-h:format=auto", None
 
 
 def build_intro_outro_filter(
@@ -610,6 +699,7 @@ def build_filter_complex(
     lower_third_duration: float | None = None,
     lower_third_interval: float = lower_third.DEFAULT_DISPLAY_INTERVAL_SECONDS,
     lower_third_display_duration: float = lower_third.DEFAULT_DISPLAY_DURATION_SECONDS,
+    lower_third_y_offset_px: int = 0,
     shorts_blur_bg: bool = False,
 ) -> tuple[str, list[str]]:
     """Build the ffmpeg filter graph in the order: effect, base, logo, lower third, subtitles."""
@@ -630,7 +720,7 @@ def build_filter_complex(
         stages.append(f"{current}split[_bg_raw][_fg_raw]")
         stages.append(
             f"[_bg_raw]scale=1080:1920:force_original_aspect_ratio=increase:flags={SCALE_FLAGS},"
-            f"crop=1080:1920,gblur=sigma=20[_bg_blurred]"
+            f"crop=1080:1920,gblur=sigma=14[_bg_blurred]"
         )
         stages.append(
             f"[_fg_raw]scale=1080:1920:force_original_aspect_ratio=decrease:flags={SCALE_FLAGS},"
@@ -705,7 +795,7 @@ def build_filter_complex(
         # Shadow: darken to black, blur — soft drop shadow
         stages.append(
             "[logo_bg]"
-            "geq=r=0:g=0:b=0:a='alpha(X,Y)*0.5',"
+            "colorchannelmixer=rr=0:gg=0:bb=0:aa=0.5,"
             "gblur=sigma=4"
             "[logo_shadow]"
         )
@@ -725,13 +815,25 @@ def build_filter_complex(
 
     if lower_third_config:
         extra_inputs.append(lower_third_config.path)
-        stages.append(f"[{input_index}:v]format=rgba[lowerthird]")
-        overlay_options = build_lower_third_overlay_options(
+        overlay_options, fade_expr = build_lower_third_overlay_options(
             lower_third_duration,
             interval=lower_third_interval,
             display_duration=lower_third_display_duration,
+            position=lower_third_config.position,
+            y_offset_px=lower_third_y_offset_px,
         )
-        stages.append(f"{current}[lowerthird]overlay={overlay_options}[withlowerthird]")
+        if lower_third_config.position == "top-center":
+            # Loop the PNG for proper timestamps; eof_action=endall prevents ffmpeg from
+            # hanging indefinitely waiting for the infinite loop stream to end.
+            stages.append(
+                f"[{input_index}:v]"
+                "loop=loop=-1:size=1:start=0,"
+                "format=rgba[lowerthird]"
+            )
+            stages.append(f"{current}[lowerthird]overlay={overlay_options}:eof_action=endall[withlowerthird]")
+        else:
+            stages.append(f"[{input_index}:v]format=rgba[lowerthird]")
+            stages.append(f"{current}[lowerthird]overlay={overlay_options}[withlowerthird]")
         current = "[withlowerthird]"
         input_index += 1
 
@@ -757,29 +859,20 @@ def build_ffmpeg_command(
     *,
     ffmpeg_path: str = "ffmpeg",
     encode_audio: bool = True,
+    audio_copy: bool = False,
 ) -> list[str]:
     """Assemble the ffmpeg command from a prepared filter graph."""
-    cmd = [ffmpeg_path, "-y", "-i", input_video]
+    cmd = [ffmpeg_path, "-y", "-threads", "0", "-i", input_video]
     for extra in extra_inputs:
         cmd.extend(["-i", extra])
     cmd.extend(["-filter_complex", filter_complex, "-map", "[outv]"])
     if encode_audio:
-        cmd.extend(["-map", "0:a?", "-c:a", "aac", "-b:a", AUDIO_ENCODER_BITRATE])
-    cmd.extend(
-        [
-            "-c:v",
-            "libx264",
-            "-preset",
-            VIDEO_ENCODER_PRESET,
-            "-crf",
-            VIDEO_ENCODER_CRF,
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-            output_path,
-        ]
-    )
+        if audio_copy:
+            cmd.extend(["-map", "0:a?", "-c:a", "copy"])
+        else:
+            cmd.extend(["-map", "0:a?", "-c:a", "aac", "-b:a", AUDIO_ENCODER_BITRATE])
+    encoder_name, encoder_args = _detect_hw_video_encoder(ffmpeg_path)
+    cmd.extend(["-c:v", encoder_name, *encoder_args, "-movflags", "+faststart", output_path])
     return cmd
 
 
@@ -881,6 +974,37 @@ def render_video_variant(
 
     try:
         use_blur_bg = options.to_shorts and options.shorts_blur_bg and not options.preview_width
+
+        # For shorts pillarbox: place the band at the correct vertical position.
+        # Probe source dims to compute pillarbox height; fall back to 16:9.
+        _lt_config_effective = options.lower_third_config
+        _lt_y_offset_px = 0
+        if (
+            use_blur_bg
+            and has_lower_third
+            and options.lower_third_config is not None
+            and options.lower_third_config.position == "top-center"
+        ):
+            _src_size = _probe_media_size(options.ffmpeg_path, input_path)
+            if _src_size:
+                _src_w, _src_h = _src_size
+                _fg_h = int(frame_width * _src_h / _src_w) if _src_w > 0 else 0
+            else:
+                _fg_h = int(frame_width * 9 / 16)
+            _pillarbox_h = (frame_height - _fg_h) // 2
+            if _pillarbox_h > 0:
+                _band_h = lower_third.lower_third_band_height(options.lower_third_config, frame_height)
+                _valign = options.lower_third_config.vertical_align
+                if _valign == "bottom":
+                    _lt_y_offset_px = max(0, _pillarbox_h - _band_h)
+                elif _valign == "center":
+                    _lt_y_offset_px = max(0, (_pillarbox_h - _band_h) // 2)
+                # "top" → y_offset stays 0
+
+        # Copy audio stream when source is already AAC — avoids full re-encode (10-15% faster)
+        _src_audio_codec = _probe_audio_codec(options.ffmpeg_path, input_path)
+        _audio_copy = _src_audio_codec == "aac" and not options.preview_width
+
         base_filters = _build_base_video_filters(
             options.to_shorts,
             options.preview_width,
@@ -951,8 +1075,14 @@ def render_video_variant(
             subtitle_config = (
                 SubtitleRenderConfig(subtitle_path) if subtitle_path else None
             )
+            _lt_position = _lt_config_effective.position if _lt_config_effective else "bottom"
+            _lt_band_h = (
+                lower_third.lower_third_band_height(_lt_config_effective, frame_height)
+                if _lt_config_effective and _lt_position == "top-center"
+                else 0
+            )
             lower_third_render_config = (
-                LowerThirdRenderConfig(lower_third_path)
+                LowerThirdRenderConfig(lower_third_path, position=_lt_position, band_h_px=_lt_band_h)
                 if lower_third_path
                 else None
             )
@@ -972,6 +1102,7 @@ def render_video_variant(
                 ),
                 lower_third_interval=options.lower_third_interval,
                 lower_third_display_duration=options.lower_third_display_duration,
+                lower_third_y_offset_px=_lt_y_offset_px,
                 shorts_blur_bg=use_blur_bg,
             )
             cmd = build_ffmpeg_command(
@@ -981,6 +1112,7 @@ def render_video_variant(
                 extra_inputs,
                 ffmpeg_path=options.ffmpeg_path,
                 encode_audio=True,
+                audio_copy=_audio_copy,
             )
             _render_log.info("FFmpeg cmd: %s", " ".join(cmd))
             try:
@@ -996,7 +1128,7 @@ def render_video_variant(
                 raise
 
         if has_subtitles and has_lower_third:
-            assert options.lower_third_config is not None
+            assert _lt_config_effective is not None
             ass_content = subtitle_renderer.build_ass_file(
                 subtitle_chunks,
                 normalized_subtitle_style,
@@ -1006,7 +1138,7 @@ def render_video_variant(
             )
             with subtitle_renderer.temporary_ass_file(ass_content) as subtitle_path:
                 with lower_third.temporary_lower_third_png(
-                    options.lower_third_config,
+                    _lt_config_effective,
                     frame_width,
                     frame_height,
                 ) as lower_third_path:
@@ -1022,9 +1154,9 @@ def render_video_variant(
             with subtitle_renderer.temporary_ass_file(ass_content) as subtitle_path:
                 _run_render(subtitle_path=subtitle_path)
         elif has_lower_third:
-            assert options.lower_third_config is not None
+            assert _lt_config_effective is not None
             with lower_third.temporary_lower_third_png(
-                options.lower_third_config,
+                _lt_config_effective,
                 frame_width,
                 frame_height,
             ) as lower_third_path:

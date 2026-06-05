@@ -54,9 +54,20 @@ class _DummyCanvas:
 class _DummyProgress:
     def __init__(self) -> None:
         self.options = {"value": 0.0, "maximum": 100.0}
+        self.state = "normal"
+        self.segments: tuple | None = None
 
     def configure(self, **kwargs) -> None:
         self.options.update(kwargs)
+
+    def set_segments(self, completed: int, total: int, current_pct: float) -> None:
+        self.segments = (completed, total, current_pct)
+
+    def clear_segments(self) -> None:
+        self.segments = None
+
+    def set_state(self, state: str) -> None:
+        self.state = state
 
 
 class _DummyEntry:
@@ -362,7 +373,7 @@ def test_resolve_yt_dlp_cmd_uses_common_tool_dirs(tmp_path, monkeypatch) -> None
 
     app = gui.TranscriptApp.__new__(gui.TranscriptApp)
 
-    assert app._resolve_yt_dlp_cmd() == [str(yt_dlp)]
+    assert app._resolve_yt_dlp_cmd() == [str(yt_dlp), "--extractor-args", "youtube:player_client=android_vr"]
     assert gui.os.environ["PATH"].split(gui.os.pathsep)[0] == str(tool_dir)
 
 
@@ -813,6 +824,7 @@ def test_load_gui_settings_returns_default_when_missing(tmp_path) -> None:
         "download_lower_third_interval": 20,
         "download_lower_third_display_duration": 4,
         "download_preset": "custom",
+        "ytdlp_cookies_browser": "",
     }
 
 
@@ -1019,6 +1031,7 @@ def test_save_gui_settings_writes_download_preferences(tmp_path) -> None:
         "download_lower_third_interval": 24,
         "download_lower_third_display_duration": 5,
         "download_preset": "tiktok_viral",
+        "ytdlp_cookies_browser": "",
     }
 
 
@@ -1413,9 +1426,12 @@ def test_build_download_variant_preview_uses_high_quality_scale(monkeypatch, tmp
         in filter_complex
     )
     assert "unsharp=5:5:0.45:5:5:0.0" in filter_complex
-    assert commands[0][commands[0].index("-preset") + 1] == "slow"
-    assert commands[0][commands[0].index("-crf") + 1] == "14"
-    assert commands[0][commands[0].index("-b:a") + 1] == "256k"
+    assert commands[0][commands[0].index("-b:a") + 1] == "192k"
+    # Encoder: h264_videotoolbox (macOS GPU) or libx264 (software fallback)
+    assert "h264_videotoolbox" in commands[0] or (
+        commands[0][commands[0].index("-preset") + 1] == "fast"
+        and commands[0][commands[0].index("-crf") + 1] == "18"
+    )
 
 
 def test_build_download_variant_adds_lower_third(monkeypatch, tmp_path) -> None:
@@ -1452,7 +1468,9 @@ def test_build_download_variant_adds_lower_third(monkeypatch, tmp_path) -> None:
         "-(mod(t,20)-3.6)*(W/0.4),0)),-W)':y=H-h:format=auto"
         "[withlowerthird]"
     ) in filter_complex
-    assert not Path(cmd[5]).exists()
+    i_positions = [i for i, x in enumerate(cmd) if x == "-i"]
+    lt_png_path = cmd[i_positions[1] + 1]
+    assert not Path(lt_png_path).exists()
 
 
 def test_build_download_variant_uses_custom_periodic_lower_third_timing(
@@ -1745,7 +1763,7 @@ def test_update_download_progress_uses_global_percentage() -> None:
     app._update_download_progress(50.0, "", "", "")
 
     assert app.download_current_progress.options["value"] == 50.0
-    assert app.download_overall_progress.options["value"] == pytest.approx(37.5)
+    assert app.download_overall_progress.segments == (1, 4, 50.0)
     assert "Global 37.5%" in app.download_detail_var.value
 
 
@@ -2020,7 +2038,7 @@ def test_update_download_ui_sets_100_percent_when_complete() -> None:
 
     app._update_download_ui(3, 3)
 
-    assert app.download_overall_progress.options["value"] == pytest.approx(100.0)
+    assert app.download_overall_progress.segments == (3, 3, 0.0)
     assert "100%" in app.download_summary_var.value
 
 

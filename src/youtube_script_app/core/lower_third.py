@@ -38,7 +38,11 @@ class LowerThirdConfig:
     font_size_ratio: float = 0.042
     height_ratio: float = 0.14
     show_subscribe: bool = True
-    position: str = "bottom"  # "bottom" or "top"
+    position: str = "bottom"  # "bottom" | "top" | "top-center"
+    title_scale: float = 1.0       # font size multiplier for channel name
+    tagline_scale: float = 1.0     # font size multiplier for tagline
+    subscribe_text: str = "Abonnez-vous"  # customizable CTA button text
+    vertical_align: str = "top"    # "top" | "center" | "bottom" within pillarbox
 
 
 def normalize_hex_color(value: object, default: str) -> str:
@@ -74,14 +78,21 @@ def config_from_hex(
     show_subscribe: bool = True,
     video_format: str = "16:9",
     position: str = "bottom",
+    bg_alpha: int | None = None,
+    title_scale: float = 1.0,
+    tagline_scale: float = 1.0,
+    subscribe_text: str = "Abonnez-vous",
+    vertical_align: str = "top",
 ) -> LowerThirdConfig:
     normalized_bg = normalize_hex_color(bg_color, DEFAULT_BG_COLOR)
     normalized_accent = normalize_hex_color(accent_color, DEFAULT_ACCENT_COLOR)
-    normalized_position = position if position in {"bottom", "top"} else "bottom"
+    normalized_position = position if position in {"bottom", "top", "top-center"} else "bottom"
+    is_top_center = normalized_position == "top-center"
+    _bg_alpha = max(0, min(255, int(bg_alpha))) if bg_alpha is not None else 220
     return LowerThirdConfig(
         channel_name=" ".join(str(channel_name or "").split()),
         tagline=" ".join(str(tagline or "").split()),
-        bg_color=rgba_from_hex(normalized_bg, alpha=220, default=DEFAULT_BG_COLOR),
+        bg_color=rgba_from_hex(normalized_bg, alpha=_bg_alpha, default=DEFAULT_BG_COLOR),
         text_color=rgba_from_hex(
             contrast_text_hex(normalized_bg),
             alpha=255,
@@ -92,11 +103,50 @@ def config_from_hex(
             alpha=255,
             default=DEFAULT_ACCENT_COLOR,
         ),
-        font_size_ratio=0.038 if video_format == "9:16" else 0.042,
-        height_ratio=0.12 if video_format == "9:16" else 0.14,
+        font_size_ratio=0.034 if is_top_center and video_format == "9:16" else (0.038 if video_format == "9:16" else 0.042),
+        height_ratio=0.20 if is_top_center and video_format == "9:16" else (0.16 if is_top_center else (0.12 if video_format == "9:16" else 0.14)),
         show_subscribe=bool(show_subscribe),
         position=normalized_position,
+        title_scale=max(0.5, min(2.0, float(title_scale))),
+        tagline_scale=max(0.5, min(2.0, float(tagline_scale))),
+        subscribe_text=str(subscribe_text or "Abonnez-vous").strip() or "Abonnez-vous",
+        vertical_align=vertical_align if vertical_align in {"top", "center", "bottom"} else "top",
     )
+
+
+def lower_third_band_height(config: LowerThirdConfig, video_height: int) -> int:
+    """Return the pixel height of the lower third band for a given video height."""
+    return max(48, int(video_height * config.height_ratio))
+
+
+def _draw_symmetric_gradient_band(
+    image: Image.Image,
+    band_y: int,
+    width: int,
+    height: int,
+    color: tuple[int, int, int, int],
+    *,
+    solid_fraction: float = 0.60,
+) -> None:
+    """Symmetric gradient: fades from both edges, solid in the center."""
+    band_height = height - band_y
+    if band_height <= 0:
+        return
+    r, g, b, a = color
+    src_w = 400
+    fade_w = max(1, int(src_w * (1.0 - solid_fraction) / 2))
+    src = Image.new("RGBA", (src_w, 1))
+    for x in range(src_w):
+        if x < fade_w:
+            t = 1.0 - (x / fade_w)
+            src.putpixel((x, 0), (r, g, b, max(0, int(a * (1.0 - t)))))
+        elif x > src_w - fade_w:
+            t = (x - (src_w - fade_w)) / fade_w
+            src.putpixel((x, 0), (r, g, b, max(0, int(a * (1.0 - t)))))
+        else:
+            src.putpixel((x, 0), (r, g, b, a))
+    gradient = src.resize((width, band_height), Image.LANCZOS)
+    image.alpha_composite(gradient, (0, band_y))
 
 
 def _draw_gradient_band(
@@ -132,7 +182,159 @@ def generate_lower_third(
     video_height: int,
     output_path: str,
 ) -> str:
-    """Generate a transparent PNG matching the final video resolution."""
+    """Generate a transparent PNG matching the final video resolution.
+
+    For position='top-center', generates a band-height PNG (not full-frame)
+    to enable y-slide animation in ffmpeg.
+    """
+    if config.position == "top-center":
+        return _generate_top_center_lower_third(config, video_width, video_height, output_path)
+    return _generate_standard_lower_third(config, video_width, video_height, output_path)
+
+
+def generate_lower_third_image(
+    config: LowerThirdConfig,
+    video_width: int,
+    video_height: int,
+) -> "Image.Image":
+    """Return a PIL Image of the lower third (no disk I/O — used for live preview)."""
+    if config.position == "top-center":
+        return _render_top_center_lower_third_image(config, video_width, video_height)
+    return _render_standard_lower_third_image(config, video_width, video_height)
+
+
+def _render_top_center_lower_third_image(
+    config: LowerThirdConfig,
+    video_width: int,
+    video_height: int,
+) -> Image.Image:
+    """Render the top-center band as a PIL Image (band height only, not full frame)."""
+    s = _RENDER_SCALE
+    width = max(1, int(video_width))
+    band_h = lower_third_band_height(config, max(1, int(video_height)))
+    render_width = width * s
+    render_band_h = band_h * s
+
+    image = Image.new("RGBA", (render_width, render_band_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+
+    _draw_symmetric_gradient_band(image, 0, render_width, render_band_h, config.bg_color, solid_fraction=0.90)
+
+    font_size = max(14 * s, int(render_band_h * 0.28 * config.title_scale))
+    tagline_size = max(10 * s, int(render_band_h * 0.28 * config.title_scale * 0.58 * config.tagline_scale))
+    subscribe_size = max(10 * s, int(font_size * 0.55))
+    padding_x = max(20 * s, int(render_width * 0.06))
+    max_text_width = render_width - padding_x * 2
+
+    font_bold = _load_font(["Arial Bold.ttf", "Arial-Bold.ttf"], font_size)
+    font_tagline = _load_font(["Arial.ttf", "Arial Unicode.ttf"], tagline_size)
+    font_subscribe = _load_font(["Arial.ttf", "Arial Unicode.ttf"], subscribe_size)
+    subscribe_text = config.subscribe_text or "Abonnez-vous"
+
+    title = _fit_text(draw, config.channel_name, font_bold, max_text_width)
+    tagline = _fit_text(draw, config.tagline, font_tagline, max_text_width)
+
+    title_bbox = draw.textbbox((0, 0), title, font=font_bold)
+    title_h = title_bbox[3] - title_bbox[1]
+    title_w = title_bbox[2] - title_bbox[0]
+
+    tagline_h = 0
+    if tagline:
+        tb = draw.textbbox((0, 0), tagline, font=font_tagline)
+        tagline_h = tb[3] - tb[1]
+
+    underline_h = max(3 * s, int(font_size * 0.08))
+    underline_gap = max(4 * s, int(font_size * 0.12))
+    underline_w = min(title_w + padding_x, int(render_width * 0.55))
+
+    btn_h = 0
+    btn_text_w = 0
+    btn_pad_x = max(10 * s, int(font_size * 0.40))
+    btn_pad_y = max(5 * s, int(font_size * 0.20))
+    if config.show_subscribe:
+        bb = draw.textbbox((0, 0), subscribe_text, font=font_subscribe)
+        btn_text_w = bb[2] - bb[0]
+        btn_text_h = bb[3] - bb[1]
+        btn_h = btn_text_h + btn_pad_y * 2
+
+    gap_tagline = max(4 * s, int(font_size * 0.14)) if tagline else 0
+    gap_btn = max(6 * s, int(font_size * 0.18)) if config.show_subscribe else 0
+    underline_total = underline_gap + underline_h + underline_gap
+
+    total_h = title_h + underline_total + tagline_h + gap_tagline + gap_btn + btn_h
+    if not tagline:
+        total_h -= gap_tagline
+    if not config.show_subscribe:
+        total_h -= gap_btn
+
+    y = max(max(4 * s, render_band_h // 20), (render_band_h - total_h) // 2)
+
+    title_x = (render_width - title_w) // 2
+    shadow_off = max(s, int(font_size * 0.04))
+    draw.text((title_x + shadow_off, y + shadow_off), title, font=font_bold, fill=(0, 0, 0, 80))
+    draw.text((title_x, y), title, font=font_bold, fill=config.text_color)
+    y += title_h + underline_gap
+
+    ul_x = (render_width - underline_w) // 2
+    draw.rectangle([ul_x, y, ul_x + underline_w, y + underline_h], fill=config.accent_color)
+    y += underline_h + underline_gap
+
+    if tagline:
+        tb = draw.textbbox((0, 0), tagline, font=font_tagline)
+        tagline_w = tb[2] - tb[0]
+        tagline_x = (render_width - tagline_w) // 2
+        muted = (config.text_color[0], config.text_color[1], config.text_color[2], 210)
+        draw.text((tagline_x, y), tagline, font=font_tagline, fill=muted)
+        y += tagline_h + gap_tagline
+
+    if config.show_subscribe:
+        y += gap_btn
+        btn_w = btn_text_w + btn_pad_x * 2
+        btn_x1 = (render_width - btn_w) // 2
+        btn_x2 = btn_x1 + btn_w
+        btn_y1 = y
+        btn_y2 = btn_y1 + btn_h
+        draw.rounded_rectangle(
+            [btn_x1, btn_y1, btn_x2, btn_y2],
+            radius=max(8 * s, (btn_y2 - btn_y1) // 2),
+            fill=config.accent_color,
+        )
+        bb = draw.textbbox((0, 0), subscribe_text, font=font_subscribe)
+        bw = bb[2] - bb[0]
+        bh = bb[3] - bb[1]
+        draw.text(
+            (btn_x1 + (btn_w - bw) // 2, btn_y1 + (btn_h - bh) // 2),
+            subscribe_text, font=font_subscribe, fill=(255, 255, 255, 255),
+        )
+
+    return image.resize((width, band_h), Image.LANCZOS)
+
+
+def _generate_top_center_lower_third(
+    config: LowerThirdConfig,
+    video_width: int,
+    video_height: int,
+    output_path: str,
+) -> str:
+    """Centered-top variant: band-height PNG with symmetric gradient and vertical stacked layout."""
+    _render_top_center_lower_third_image(config, video_width, video_height).save(output_path, format="PNG")
+    return output_path
+
+
+def _render_standard_lower_third_image(
+    config: LowerThirdConfig,
+    video_width: int,
+    video_height: int,
+) -> Image.Image:
+    """Standard lower third: full-frame PIL Image with left-aligned gradient band."""
+    return _generate_standard_lower_third_image(config, video_width, video_height)
+
+
+def _generate_standard_lower_third_image(
+    config: LowerThirdConfig,
+    video_width: int,
+    video_height: int,
+) -> Image.Image:
     s = _RENDER_SCALE
     width = max(1, int(video_width))
     height = max(1, int(video_height))
@@ -195,25 +397,11 @@ def generate_lower_third(
     text_block_h = title_h + gap + tagline_h
     text_y = band_y + ((band_h - text_block_h) // 2)
 
-    shadow_offset = max(2 * s, int(font_size * 0.06))
-    shadow_color = (0, 0, 0, 120)
-    draw.text(
-        (text_x + shadow_offset, text_y + shadow_offset),
-        title,
-        font=font_bold,
-        fill=shadow_color,
-    )
     draw.text((text_x, text_y), title, font=font_bold, fill=config.text_color)
 
     if tagline:
         tagline_y = text_y + title_h + gap
         muted = (config.text_color[0], config.text_color[1], config.text_color[2], 210)
-        draw.text(
-            (text_x + shadow_offset, tagline_y + shadow_offset),
-            tagline,
-            font=font_tagline,
-            fill=shadow_color,
-        )
         draw.text((text_x, tagline_y), tagline, font=font_tagline, fill=muted)
 
     if subscribe_box is not None:
@@ -231,13 +419,20 @@ def generate_lower_third(
                 btn_x1 + ((btn_x2 - btn_x1 - btn_text_w) // 2),
                 btn_y1 + ((btn_y2 - btn_y1 - btn_text_h) // 2),
             ),
-            subscribe_text,
-            font=subscribe_font,
-            fill=(255, 255, 255, 255),
+            subscribe_text, font=subscribe_font, fill=(255, 255, 255, 255),
         )
 
-    final = image.resize((width, height), Image.LANCZOS)
-    final.save(output_path, format="PNG")
+    return image.resize((width, height), Image.LANCZOS)
+
+
+def _generate_standard_lower_third(
+    config: LowerThirdConfig,
+    video_width: int,
+    video_height: int,
+    output_path: str,
+) -> str:
+    """Standard lower third: full-frame PNG with left-aligned gradient band."""
+    _generate_standard_lower_third_image(config, video_width, video_height).save(output_path, format="PNG")
     return output_path
 
 

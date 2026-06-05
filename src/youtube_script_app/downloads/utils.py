@@ -125,6 +125,12 @@ def build_best_video_download_args(video_format: str) -> List[str]:
         BEST_VIDEO_SORT_ORDER,
         "--merge-output-format",
         normalized_format,
+        "--fixup",
+        "force",
+        "--socket-timeout",
+        "30",
+        "--concurrent-fragments",
+        "8",
     ]
 
 

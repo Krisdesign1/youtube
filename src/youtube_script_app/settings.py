@@ -44,6 +44,7 @@ def default_gui_settings() -> dict:
         "download_lower_third_interval": lower_third.DEFAULT_DISPLAY_INTERVAL_SECONDS,
         "download_lower_third_display_duration": lower_third.DEFAULT_DISPLAY_DURATION_SECONDS,
         "download_preset": "custom",
+        "ytdlp_cookies_browser": "",
     }
 
 
@@ -275,6 +276,10 @@ def normalize_gui_settings(raw: object) -> dict:
     settings["download_preset"] = presets.normalize_preset_key(
         raw.get("download_preset", settings["download_preset"])
     )
+    browser = str(raw.get("ytdlp_cookies_browser", "")).strip().lower()
+    if browser not in {"chrome", "firefox", "safari", "edge", "chromium", "brave"}:
+        browser = ""
+    settings["ytdlp_cookies_browser"] = browser
     return settings
 
 

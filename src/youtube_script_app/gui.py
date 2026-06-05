@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 import webbrowser
@@ -58,6 +59,33 @@ DOWNLOAD_DEST_RE = re.compile(r"\[download\]\s+Destination:\s+(.*)")
 DOWNLOAD_MERGER_RE = re.compile(r"\[Merger\]\s+Merging formats into\s+\"(.+)\"")
 DOWNLOAD_ALREADY_RE = re.compile(r"\[download\]\s+(.+?) has already been downloaded")
 INVALID_FILENAME_CHARS_RE = re.compile(r'[\x00-\x1f<>:"/\\|?*]+')
+_YTDLP_ERROR_PATTERNS: list[tuple[str, str]] = [
+    ("operation not permitted", "Accès aux cookies refusé par macOS. Va dans Réglages Système → Confidentialité → Accès complet au disque et ajoute Terminal (ou l'app). Ou utilise Chrome/Firefox à la place de Safari."),
+    ("errno 1", "Accès aux cookies refusé par macOS. Va dans Réglages Système → Confidentialité → Accès complet au disque et ajoute Terminal (ou l'app). Ou utilise Chrome/Firefox à la place de Safari."),
+    ("cookies.binarycookies", "Accès aux cookies Safari refusé par macOS. Utilise Chrome ou Firefox à la place, ou accorde l'accès complet au disque dans Réglages Système → Confidentialité."),
+    ("only images are available", "YouTube requiert un PO Token pour cette vidéo. Installe Node.js (https://nodejs.org) pour résoudre le challenge, ou configure des cookies de navigateur."),
+    ("po-token", "YouTube requiert un PO Token. Installe Node.js ou configure yt-dlp avec des cookies de navigateur."),
+    ("requested format is not available", "Le format vidéo demandé n'est pas disponible pour cette vidéo. Essaie un autre format."),
+    ("this video is available to this channel's members", "Cette vidéo est réservée aux membres de la chaîne."),
+    ("members only", "Cette vidéo est réservée aux membres de la chaîne."),
+    ("private video", "Cette vidéo est privée."),
+    ("video unavailable", "Cette vidéo n'est pas disponible dans votre région ou a été supprimée."),
+    ("http error 403", "Accès refusé par YouTube (HTTP 403). La vidéo est peut-être géo-bloquée."),
+    ("sign in to confirm", "YouTube demande une connexion pour accéder à cette vidéo."),
+    ("this video has been removed", "Cette vidéo a été supprimée."),
+]
+
+def _diagnose_ytdlp_error(stderr_lines: list[str]) -> str:
+    combined = " ".join(stderr_lines).lower()
+    for pattern, message in _YTDLP_ERROR_PATTERNS:
+        if pattern in combined:
+            return message
+    for line in reversed(stderr_lines):
+        if line.startswith("ERROR:"):
+            return line.removeprefix("ERROR:").strip()
+    return "Le téléchargement a échoué."
+
+
 FILENAME_SPACES_RE = re.compile(r"\s+")
 COMMON_TOOL_DIRS = (
     "/opt/homebrew/bin",
@@ -129,6 +157,176 @@ BUTTON_VARIANTS = {
     "tertiary": "Subtle.TButton",
     "link": "Link.TButton",
 }
+
+
+class _CanvasProgress(tk.Canvas):
+    """Canvas-based progress bar: text overlay, pulse animation, colour states, segments."""
+
+    _PULSE_STEP = 6
+    _PULSE_MS = 22
+
+    def __init__(
+        self,
+        parent,
+        *,
+        height: int = 20,
+        palette: dict,
+        font_family: str = "Arial",
+        show_text: bool = True,
+        **kwargs,
+    ) -> None:
+        super().__init__(parent, height=height, highlightthickness=0, bd=0, **kwargs)
+        self._pal = palette
+        self._ff = font_family
+        self._value = 0.0
+        self._maximum = 100.0
+        self._mode = "determinate"
+        self._color_state = "normal"
+        self._show_text = show_text and height >= 14
+        self._pulse_x = 0.0
+        self._pulse_job: str | None = None
+        self._seg: tuple[int, int, float] | None = None
+        self.bind("<Configure>", lambda _e: self._draw())
+
+    # --- public API (mirrors ttk.Progressbar) --------------------------------
+
+    def configure(self, **kwargs):
+        value = kwargs.pop("value", None)
+        maximum = kwargs.pop("maximum", None)
+        mode = kwargs.pop("mode", None)
+        if kwargs:
+            super().configure(**kwargs)
+        if maximum is not None:
+            self._maximum = max(1.0, float(maximum))
+        if mode is not None:
+            if mode == "indeterminate" and self._mode != "indeterminate":
+                self._mode = "indeterminate"
+                self._start_pulse()
+            elif mode == "determinate":
+                self._stop_pulse()
+                self._mode = "determinate"
+        if value is not None:
+            self._value = float(value)
+            if self._mode == "indeterminate":
+                self._stop_pulse()
+                self._mode = "determinate"
+        self._draw()
+
+    config = configure
+
+    def set_state(self, state: str) -> None:
+        """Change colour: 'normal' (blue), 'success' (green), 'error' (red)."""
+        self._color_state = state
+        self._draw()
+
+    def set_segments(self, completed: int, total: int, current_pct: float) -> None:
+        """Segmented overall view: green=done, blue=active, grey=pending."""
+        if self._mode == "indeterminate":
+            self._stop_pulse()
+            self._mode = "determinate"
+        self._seg = (int(completed), int(total), float(current_pct))
+        self._draw()
+
+    def clear_segments(self) -> None:
+        self._seg = None
+        self._draw()
+
+    # --- drawing internals ---------------------------------------------------
+
+    def _bar_color(self) -> str:
+        if self._color_state == "success":
+            return self._pal["success"]
+        if self._color_state == "error":
+            return self._pal["danger"]
+        return self._pal["accent"]
+
+    def _draw(self) -> None:
+        self.delete("all")
+        w = self.winfo_width()
+        h = self.winfo_height()
+        if w < 2 or h < 2:
+            self.after(40, self._draw)
+            return
+        self.create_rectangle(0, 0, w, h, fill=self._pal["bg_alt"], outline="")
+        if self._mode == "indeterminate":
+            self._draw_pulse(w, h)
+        elif self._seg is not None:
+            self._draw_segments(w, h)
+        else:
+            self._draw_simple(w, h)
+        if self._show_text and self._mode != "indeterminate":
+            self._draw_text(w, h)
+
+    def _draw_simple(self, w: int, h: int) -> None:
+        pct = min(1.0, self._value / self._maximum)
+        fw = int(w * pct)
+        if fw > 0:
+            self.create_rectangle(0, 0, fw, h, fill=self._bar_color(), outline="")
+
+    def _draw_segments(self, w: int, h: int) -> None:
+        completed, total, current_pct = self._seg
+        if total <= 0:
+            return
+        gap = 2 if total > 1 else 0
+        seg_w = max(1.0, (w - gap * (total - 1)) / total)
+        for i in range(total):
+            x0 = int(i * (seg_w + gap))
+            x1 = int(x0 + seg_w)
+            if i < completed:
+                self.create_rectangle(x0, 0, x1, h, fill=self._pal["success"], outline="")
+            elif i == completed:
+                self.create_rectangle(x0, 0, x1, h, fill=self._pal["border"], outline="")
+                fw = int((x1 - x0) * current_pct / 100.0)
+                if fw > 0:
+                    self.create_rectangle(x0, 0, x0 + fw, h, fill=self._pal["accent"], outline="")
+            else:
+                self.create_rectangle(x0, 0, x1, h, fill=self._pal["border"], outline="")
+
+    def _draw_text(self, w: int, h: int) -> None:
+        if self._seg is not None:
+            completed, total, current_pct = self._seg
+            pct = ((completed + current_pct / 100.0) / max(1, total)) * 100.0
+        else:
+            pct = min(100.0, (self._value / self._maximum) * 100.0)
+        text = f"{pct:.0f}%"
+        fg = "#ffffff" if pct > 50 else self._pal["text"]
+        self.create_text(
+            w // 2, h // 2,
+            text=text,
+            fill=fg,
+            font=(self._ff, 8, "bold"),
+            anchor="center",
+        )
+
+    def _draw_pulse(self, w: int, h: int) -> None:
+        pw = max(w // 3, 30)
+        x0 = max(0, int(self._pulse_x - pw))
+        x1 = min(w, int(self._pulse_x))
+        if x1 > x0:
+            self.create_rectangle(x0, 0, x1, h, fill=self._pal["accent"], outline="")
+
+    def _start_pulse(self) -> None:
+        self._pulse_x = 0.0
+        self._stop_pulse()
+        self._pulse_job = self.after(self._PULSE_MS, self._tick_pulse)
+
+    def _stop_pulse(self) -> None:
+        if self._pulse_job:
+            try:
+                self.after_cancel(self._pulse_job)
+            except Exception:
+                pass
+            self._pulse_job = None
+
+    def _tick_pulse(self) -> None:
+        w = self.winfo_width()
+        if w > 1:
+            self._pulse_x += self._PULSE_STEP
+            if self._pulse_x > w + w // 3:
+                self._pulse_x = 0.0
+            self._draw()
+        if self._mode == "indeterminate":
+            self._pulse_job = self.after(self._PULSE_MS, self._tick_pulse)
 
 
 class TranscriptApp:
@@ -247,6 +445,14 @@ class TranscriptApp:
         self.download_lower_third_display_duration_label_var = tk.StringVar(
             value=f"{lower_third.DEFAULT_DISPLAY_DURATION_SECONDS}s"
         )
+        self.download_lower_third_title_scale_var = tk.IntVar(value=100)
+        self.download_lower_third_title_scale_label_var = tk.StringVar(value="100%")
+        self.download_lower_third_tagline_scale_var = tk.IntVar(value=100)
+        self.download_lower_third_tagline_scale_label_var = tk.StringVar(value="100%")
+        self.download_lower_third_subscribe_text_var = tk.StringVar(value="Abonnez-vous")
+        self.download_lower_third_bg_opacity_var = tk.IntVar(value=86)
+        self.download_lower_third_bg_opacity_label_var = tk.StringVar(value="86%")
+        self.download_lower_third_valign_var = tk.StringVar(value="Bas")
         self.config_summary_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value="Prêt.")
         self.meta_var = tk.StringVar(value="")
@@ -282,6 +488,9 @@ class TranscriptApp:
         self.download_thread: threading.Thread | None = None
         self.download_log_visible = False
         self.busy = False
+        self._moment_mini_bars: dict[int, _CanvasProgress] = {}
+        self._current_download_card_index: int | None = None
+        self.ytdlp_cookies_browser_var = tk.StringVar(value="")
         self.cancel_event = threading.Event()
         self.generation_thread: threading.Thread | None = None
         self.preview_thread: threading.Thread | None = None
@@ -345,14 +554,26 @@ class TranscriptApp:
         self.download_lower_third_enabled_var.trace_add(
             "write", self._on_lower_third_change
         )
+        self.download_lower_third_position_var.trace_add(
+            "write", self._on_lower_third_change
+        )
         self.download_lower_third_name_var.trace_add(
             "write", self._on_download_preferences_change
+        )
+        self.download_lower_third_name_var.trace_add(
+            "write", lambda *_: self._redraw_lower_third_preview()
         )
         self.download_lower_third_tagline_var.trace_add(
             "write", self._on_download_preferences_change
         )
+        self.download_lower_third_tagline_var.trace_add(
+            "write", lambda *_: self._redraw_lower_third_preview()
+        )
         self.download_lower_third_subscribe_var.trace_add(
             "write", self._on_download_preferences_change
+        )
+        self.download_lower_third_subscribe_var.trace_add(
+            "write", lambda *_: self._redraw_lower_third_preview()
         )
         self.download_lower_third_bg_color_var.trace_add(
             "write", self._on_lower_third_color_change
@@ -365,6 +586,21 @@ class TranscriptApp:
         )
         self.download_lower_third_display_duration_var.trace_add(
             "write", self._on_lower_third_timing_change
+        )
+        self.download_lower_third_title_scale_var.trace_add(
+            "write", self._on_lower_third_preview_change
+        )
+        self.download_lower_third_tagline_scale_var.trace_add(
+            "write", self._on_lower_third_preview_change
+        )
+        self.download_lower_third_subscribe_text_var.trace_add(
+            "write", self._on_lower_third_preview_change
+        )
+        self.download_lower_third_bg_opacity_var.trace_add(
+            "write", self._on_lower_third_preview_change
+        )
+        self.download_lower_third_valign_var.trace_add(
+            "write", self._on_lower_third_preview_change
         )
         self.download_logo_entry.bind(
             "<FocusOut>", self._on_download_logo_focus_out, add="+"
@@ -951,8 +1187,29 @@ class TranscriptApp:
             style="CardMuted.TLabel",
         )
         self.config_summary_label.grid(
-            row=4, column=0, columnspan=2, sticky="w", padx=16, pady=(0, 10)
+            row=4, column=0, columnspan=2, sticky="w", padx=16, pady=(0, 4)
         )
+
+        cookies_row = tk.Frame(url_card, bg=self.palette["card"])
+        cookies_row.grid(row=5, column=0, columnspan=2, sticky="w", padx=16, pady=(0, 10))
+        ttk.Label(
+            cookies_row,
+            text="Cookies navigateur :",
+            style="CardMuted.TLabel",
+        ).grid(row=0, column=0, sticky="w")
+        self._cookies_browser_combo = ttk.Combobox(
+            cookies_row,
+            textvariable=self.ytdlp_cookies_browser_var,
+            values=["Aucun", "Chrome", "Firefox", "Safari", "Edge", "Brave"],
+            state="readonly",
+            width=10,
+        )
+        self._cookies_browser_combo.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        ttk.Label(
+            cookies_row,
+            text="— si YouTube bloque le téléchargement",
+            style="CardMuted.TLabel",
+        ).grid(row=0, column=2, sticky="w", padx=(8, 0))
 
         download_status_shadow = tk.Frame(container, bg=self.palette["shadow"])
         download_status_shadow.grid(row=2, column=0, sticky="ew", pady=(0, 14))
@@ -988,23 +1245,25 @@ class TranscriptApp:
         )
         self.download_toggle_button.grid(row=0, column=1, sticky="e")
 
-        self.download_overall_progress = ttk.Progressbar(
+        self.download_overall_progress = _CanvasProgress(
             download_status_card,
-            mode="determinate",
-            maximum=1,
-            value=0,
-            style="Blue.Horizontal.TProgressbar",
+            height=20,
+            palette=self.palette,
+            font_family=self.font_family,
+            show_text=True,
+            bg=self.palette["card"],
         )
         self.download_overall_progress.grid(
             row=1, column=0, sticky="ew", padx=16, pady=(4, 4)
         )
 
-        self.download_current_progress = ttk.Progressbar(
+        self.download_current_progress = _CanvasProgress(
             download_status_card,
-            mode="determinate",
-            maximum=100,
-            value=0,
-            style="Blue.Horizontal.TProgressbar",
+            height=14,
+            palette=self.palette,
+            font_family=self.font_family,
+            show_text=True,
+            bg=self.palette["card"],
         )
         self.download_current_progress.grid(
             row=2, column=0, sticky="ew", padx=16, pady=(0, 8)
@@ -1394,7 +1653,7 @@ class TranscriptApp:
         self.download_lower_third_position_combo = ttk.Combobox(
             lower_position_row,
             textvariable=self.download_lower_third_position_var,
-            values=["Bas", "Haut"],
+            values=["Bas", "Haut", "Centré haut"],
             state="readonly",
             width=8,
         )
@@ -1501,9 +1760,121 @@ class TranscriptApp:
             sticky="ew",
         )
 
+        # ── Aperçu lower third ──────────────────────────────────────────
+        lt_preview_outer = tk.Frame(self.download_lower_third_frame, bg=self.palette["card"])
+        lt_preview_outer.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(12, 0))
+        lt_preview_outer.grid_columnconfigure(0, weight=1)
+        ttk.Label(lt_preview_outer, text="Aperçu lower third", style="Card.TLabel").grid(
+            row=0, column=0, sticky="w"
+        )
+        self.download_lower_third_preview_canvas = tk.Canvas(
+            lt_preview_outer, width=140, height=248,
+            bg=self.palette["bg_alt"], highlightthickness=1,
+            highlightbackground=self.palette["shadow"],
+        )
+        self.download_lower_third_preview_canvas.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.download_lower_third_preview_canvas.bind(
+            "<Configure>", lambda _e: self._redraw_lower_third_preview()
+        )
+
+        # ── Taille titre ────────────────────────────────────────────────
+        lt_title_scale_row = tk.Frame(self.download_lower_third_frame, bg=self.palette["card"])
+        lt_title_scale_row.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        lt_title_scale_row.grid_columnconfigure(0, weight=1)
+        ttk.Label(lt_title_scale_row, text="Taille titre", style="Card.TLabel").grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Label(
+            lt_title_scale_row, textvariable=self.download_lower_third_title_scale_label_var,
+            style="CardMuted.TLabel",
+        ).grid(row=0, column=1, sticky="e")
+        self.download_lower_third_title_scale_slider = tk.Scale(
+            lt_title_scale_row, from_=50, to=150, resolution=5, orient="horizontal",
+            variable=self.download_lower_third_title_scale_var,
+            command=lambda _v: self._on_lower_third_preview_change(),
+            bg=self.palette["card"], troughcolor=self.palette["bg_alt"],
+            activebackground=self.palette["accent"], highlightthickness=0,
+        )
+        self.download_lower_third_title_scale_slider.grid(
+            row=1, column=0, columnspan=2, sticky="ew"
+        )
+
+        # ── Taille tagline ──────────────────────────────────────────────
+        lt_tagline_scale_row = tk.Frame(self.download_lower_third_frame, bg=self.palette["card"])
+        lt_tagline_scale_row.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        lt_tagline_scale_row.grid_columnconfigure(0, weight=1)
+        ttk.Label(lt_tagline_scale_row, text="Taille tagline", style="Card.TLabel").grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Label(
+            lt_tagline_scale_row, textvariable=self.download_lower_third_tagline_scale_label_var,
+            style="CardMuted.TLabel",
+        ).grid(row=0, column=1, sticky="e")
+        self.download_lower_third_tagline_scale_slider = tk.Scale(
+            lt_tagline_scale_row, from_=50, to=150, resolution=5, orient="horizontal",
+            variable=self.download_lower_third_tagline_scale_var,
+            command=lambda _v: self._on_lower_third_preview_change(),
+            bg=self.palette["card"], troughcolor=self.palette["bg_alt"],
+            activebackground=self.palette["accent"], highlightthickness=0,
+        )
+        self.download_lower_third_tagline_scale_slider.grid(
+            row=1, column=0, columnspan=2, sticky="ew"
+        )
+
+        # ── Texte bouton ────────────────────────────────────────────────
+        lt_sub_text_row = tk.Frame(self.download_lower_third_frame, bg=self.palette["card"])
+        lt_sub_text_row.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        lt_sub_text_row.grid_columnconfigure(1, weight=1)
+        ttk.Label(lt_sub_text_row, text="Texte bouton", style="Card.TLabel").grid(
+            row=0, column=0, sticky="w"
+        )
+        self.download_lower_third_subscribe_text_entry = ttk.Entry(
+            lt_sub_text_row, textvariable=self.download_lower_third_subscribe_text_var, width=18,
+        )
+        self.download_lower_third_subscribe_text_entry.grid(
+            row=0, column=1, sticky="ew", padx=(10, 0)
+        )
+
+        # ── Opacité fond ────────────────────────────────────────────────
+        lt_opacity_row = tk.Frame(self.download_lower_third_frame, bg=self.palette["card"])
+        lt_opacity_row.grid(row=10, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        lt_opacity_row.grid_columnconfigure(0, weight=1)
+        ttk.Label(lt_opacity_row, text="Opacité fond", style="Card.TLabel").grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Label(
+            lt_opacity_row, textvariable=self.download_lower_third_bg_opacity_label_var,
+            style="CardMuted.TLabel",
+        ).grid(row=0, column=1, sticky="e")
+        self.download_lower_third_bg_opacity_slider = tk.Scale(
+            lt_opacity_row, from_=20, to=100, resolution=5, orient="horizontal",
+            variable=self.download_lower_third_bg_opacity_var,
+            command=lambda _v: self._on_lower_third_preview_change(),
+            bg=self.palette["card"], troughcolor=self.palette["bg_alt"],
+            activebackground=self.palette["accent"], highlightthickness=0,
+        )
+        self.download_lower_third_bg_opacity_slider.grid(
+            row=1, column=0, columnspan=2, sticky="ew"
+        )
+
+        # ── Position verticale (Centré haut only) ───────────────────────
+        lt_valign_row = tk.Frame(self.download_lower_third_frame, bg=self.palette["card"])
+        lt_valign_row.grid(row=11, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        lt_valign_row.grid_columnconfigure(0, weight=1)
+        ttk.Label(lt_valign_row, text="Position dans la zone", style="Card.TLabel").grid(
+            row=0, column=0, sticky="w"
+        )
+        self.download_lower_third_valign_combo = ttk.Combobox(
+            lt_valign_row, textvariable=self.download_lower_third_valign_var,
+            values=["Haut", "Centre", "Bas"], state="readonly", width=8,
+        )
+        self.download_lower_third_valign_combo.grid(row=0, column=1, sticky="w", padx=(10, 0))
+        self._lt_valign_row = lt_valign_row  # keep ref for show/hide
+
         self._update_download_logo_controls_state()
         self._update_lower_third_controls_state()
         self._redraw_logo_preview()
+        self.master.after_idle(self._redraw_lower_third_preview)
 
         self.options_body.grid_remove()
 
@@ -1869,6 +2240,7 @@ class TranscriptApp:
             child.destroy()
         self._moment_excerpt_labels = []
         self._moment_action_buttons = []
+        self._moment_mini_bars = {}
 
         if not moments:
             self.moments_count_label.configure(text="0 moment")
@@ -2007,6 +2379,17 @@ class TranscriptApp:
             )
             copy_button.grid(row=0, column=3, sticky="ew", padx=(8, 0))
             self._moment_action_buttons.append(copy_button)
+
+            mini_bar = _CanvasProgress(
+                card,
+                height=4,
+                palette=self.palette,
+                font_family=self.font_family,
+                show_text=False,
+                bg=self.palette["card"],
+            )
+            mini_bar.grid(row=3, column=0, columnspan=3, sticky="ew")
+            self._moment_mini_bars[index] = mini_bar
 
     def _open_at_minute(self, minute_index: int) -> None:
         url = self.last_url or self._get_entry_value(self.url_entry)
@@ -2391,6 +2774,7 @@ class TranscriptApp:
                 "download_lower_third_interval": lower_third_interval,
                 "download_lower_third_display_duration": lower_third_display_duration,
                 "download_preset": download_preset,
+                "ytdlp_cookies_browser": self._selected_cookies_browser(),
             }
         )
         self.gui_settings = save_gui_settings(path, snapshot, LOGGER)
@@ -2602,6 +2986,14 @@ class TranscriptApp:
         )
         if hasattr(self, "download_preset_var"):
             self.download_preset_var.set(selected_preset_label)
+
+        saved_browser = str(snapshot.get("ytdlp_cookies_browser", "")).strip().lower()
+        browser_label = {
+            "chrome": "Chrome", "firefox": "Firefox",
+            "safari": "Safari", "edge": "Edge", "brave": "Brave",
+        }.get(saved_browser, "Aucun")
+        if hasattr(self, "ytdlp_cookies_browser_var"):
+            self.ytdlp_cookies_browser_var.set(browser_label)
         self._update_download_logo_controls_state()
         self._update_value_add_controls_state()
         self._update_lower_third_controls_state()
@@ -2621,12 +3013,18 @@ class TranscriptApp:
 
     def _on_lower_third_change(self, *_: object) -> None:
         self._update_lower_third_controls_state()
+        self._redraw_lower_third_preview()
         self._update_config_summary()
         self._save_gui_settings()
 
     def _on_lower_third_color_change(self, *_: object) -> None:
         self._update_lower_third_controls_state()
+        self._redraw_lower_third_preview()
         self._save_gui_settings()
+
+    def _on_lower_third_preview_change(self, *_: object) -> None:
+        self._sync_lower_third_scale_labels()
+        self._redraw_lower_third_preview()
 
     def _on_lower_third_timing_change(self, *_: object) -> None:
         self._sync_lower_third_timing_labels()
@@ -2935,10 +3333,36 @@ class TranscriptApp:
             "download_lower_third_accent_button",
             "download_lower_third_interval_scale",
             "download_lower_third_display_duration_scale",
+            "download_lower_third_title_scale_slider",
+            "download_lower_third_tagline_scale_slider",
+            "download_lower_third_subscribe_text_entry",
+            "download_lower_third_bg_opacity_slider",
+            "download_lower_third_valign_combo",
         ):
             widget = getattr(self, name, None)
             if widget is not None:
                 widget.configure(state=state)
+
+        # Subscribe text entry enabled only when subscribe button is shown
+        sub_text_entry = getattr(self, "download_lower_third_subscribe_text_entry", None)
+        if sub_text_entry is not None and visible and not getattr(self, "busy", False):
+            sub_on = bool(
+                self.download_lower_third_subscribe_var.get()
+                if hasattr(self, "download_lower_third_subscribe_var") else True
+            )
+            sub_text_entry.configure(state="normal" if sub_on else "disabled")
+
+        # Valign row: only visible for "Centré haut" position
+        valign_row = getattr(self, "_lt_valign_row", None)
+        if valign_row is not None:
+            pos_label = (
+                self.download_lower_third_position_var.get()
+                if hasattr(self, "download_lower_third_position_var") else ""
+            )
+            if visible and pos_label == "Centré haut":
+                valign_row.grid()
+            else:
+                valign_row.grid_remove()
 
         bg_swatch = getattr(self, "download_lower_third_bg_swatch", None)
         if bg_swatch is not None and hasattr(self, "download_lower_third_bg_color_var"):
@@ -2984,6 +3408,22 @@ class TranscriptApp:
         video_format = (
             "9:16" if self._selected_download_aspect_mode() == "shorts" else "16:9"
         )
+        _bg_opacity = (
+            self.download_lower_third_bg_opacity_var.get()
+            if hasattr(self, "download_lower_third_bg_opacity_var") else 86
+        )
+        _title_scale = (
+            self.download_lower_third_title_scale_var.get()
+            if hasattr(self, "download_lower_third_title_scale_var") else 100
+        ) / 100.0
+        _tagline_scale = (
+            self.download_lower_third_tagline_scale_var.get()
+            if hasattr(self, "download_lower_third_tagline_scale_var") else 100
+        ) / 100.0
+        _sub_text = (
+            self.download_lower_third_subscribe_text_var.get().strip()
+            if hasattr(self, "download_lower_third_subscribe_text_var") else ""
+        ) or "Abonnez-vous"
         return lower_third.config_from_hex(
             channel_name=name,
             tagline=(
@@ -3007,13 +3447,157 @@ class TranscriptApp:
                 else True
             ),
             video_format=video_format,
-            position=(
-                "top"
-                if getattr(self, "download_lower_third_position_var", None) is not None
-                and self.download_lower_third_position_var.get() == "Haut"
-                else "bottom"
-            ),
+            position=self._selected_lower_third_position(),
+            bg_alpha=int(_bg_opacity * 2.55),
+            title_scale=_title_scale,
+            tagline_scale=_tagline_scale,
+            subscribe_text=_sub_text,
+            vertical_align=self._selected_lower_third_valign(),
         )
+
+    def _selected_lower_third_position(self) -> str:
+        var = getattr(self, "download_lower_third_position_var", None)
+        if var is None:
+            return "bottom"
+        label = var.get()
+        return {"Haut": "top", "Centré haut": "top-center"}.get(label, "bottom")
+
+    def _selected_lower_third_valign(self) -> str:
+        var = getattr(self, "download_lower_third_valign_var", None)
+        if var is None:
+            return "top"
+        label = var.get()
+        return {"Centre": "center", "Bas": "bottom"}.get(label, "top")
+
+    def _sync_lower_third_scale_labels(self) -> None:
+        t_var = getattr(self, "download_lower_third_title_scale_var", None)
+        t_lbl = getattr(self, "download_lower_third_title_scale_label_var", None)
+        if t_var and t_lbl:
+            t_lbl.set(f"{t_var.get()}%")
+        g_var = getattr(self, "download_lower_third_tagline_scale_var", None)
+        g_lbl = getattr(self, "download_lower_third_tagline_scale_label_var", None)
+        if g_var and g_lbl:
+            g_lbl.set(f"{g_var.get()}%")
+        o_var = getattr(self, "download_lower_third_bg_opacity_var", None)
+        o_lbl = getattr(self, "download_lower_third_bg_opacity_label_var", None)
+        if o_var and o_lbl:
+            o_lbl.set(f"{o_var.get()}%")
+
+    def _redraw_lower_third_preview(self) -> None:
+        canvas = getattr(self, "download_lower_third_preview_canvas", None)
+        if canvas is None:
+            return
+        try:
+            canvas.update_idletasks()
+            cw = max(1, canvas.winfo_width())
+            ch = max(1, canvas.winfo_height())
+            canvas.delete("all")
+        except tk.TclError:
+            return
+
+        # Background frame
+        canvas.create_rectangle(
+            1, 1, cw - 2, ch - 2,
+            fill=self.palette["bg_alt"], outline=self.palette["shadow"],
+        )
+
+        position = self._selected_lower_third_position()
+        is_portrait = (position == "top-center")
+        vw, vh = (1080, 1920) if is_portrait else (1920, 1080)
+
+        name_var = getattr(self, "download_lower_third_name_var", None)
+        name = (name_var.get().strip() if name_var else "") or "Nom de la chaîne"
+
+        opacity_var = getattr(self, "download_lower_third_bg_opacity_var", None)
+        bg_alpha = int((opacity_var.get() if opacity_var else 86) * 2.55)
+
+        title_s_var = getattr(self, "download_lower_third_title_scale_var", None)
+        title_scale = (title_s_var.get() if title_s_var else 100) / 100.0
+        tag_s_var = getattr(self, "download_lower_third_tagline_scale_var", None)
+        tagline_scale = (tag_s_var.get() if tag_s_var else 100) / 100.0
+        sub_text_var = getattr(self, "download_lower_third_subscribe_text_var", None)
+        sub_text = (sub_text_var.get().strip() if sub_text_var else "") or "Abonnez-vous"
+
+        video_format = "9:16" if is_portrait else "16:9"
+        try:
+            cfg = lower_third.config_from_hex(
+                channel_name=name,
+                tagline=(
+                    self.download_lower_third_tagline_var.get()
+                    if hasattr(self, "download_lower_third_tagline_var") else ""
+                ),
+                bg_color=(
+                    self.download_lower_third_bg_color_var.get()
+                    if hasattr(self, "download_lower_third_bg_color_var")
+                    else lower_third.DEFAULT_BG_COLOR
+                ),
+                accent_color=(
+                    self.download_lower_third_accent_color_var.get()
+                    if hasattr(self, "download_lower_third_accent_color_var")
+                    else lower_third.DEFAULT_ACCENT_COLOR
+                ),
+                show_subscribe=(
+                    bool(self.download_lower_third_subscribe_var.get())
+                    if hasattr(self, "download_lower_third_subscribe_var") else True
+                ),
+                video_format=video_format,
+                position=position,
+                bg_alpha=bg_alpha,
+                title_scale=title_scale,
+                tagline_scale=tagline_scale,
+                subscribe_text=sub_text,
+                vertical_align=self._selected_lower_third_valign(),
+            )
+            lt_img = lower_third.generate_lower_third_image(cfg, vw, vh)
+        except Exception:
+            canvas.create_text(
+                cw // 2, ch // 2, text="Erreur aperçu",
+                fill=self.palette["danger"], font=(self.font_family, 8),
+            )
+            return
+
+        if is_portrait:
+            # Draw a simulated 9:16 shorts frame on the canvas
+            scale = ch / vh
+            fg_h_virt = int(vw * 9 / 16)          # 607 px
+            pb_h_virt = (vh - fg_h_virt) // 2      # 656 px
+            pb_canvas = int(pb_h_virt * scale)
+            fg_canvas = int(fg_h_virt * scale)
+
+            # Bottom pillarbox (blurred mirror)
+            canvas.create_rectangle(1, 1, cw - 2, ch - 2, fill="#555555")
+            # Video zone (slightly warmer)
+            canvas.create_rectangle(1, pb_canvas, cw - 2, pb_canvas + fg_canvas, fill="#6a5040")
+            # Top pillarbox grid lines
+            canvas.create_line(cw // 3, 1, cw // 3, pb_canvas - 1, fill="#666666")
+            canvas.create_line(2 * cw // 3, 1, 2 * cw // 3, pb_canvas - 1, fill="#666666")
+
+            # Place the lower-third band at the correct y position
+            _valign = self._selected_lower_third_valign()
+            band_h_virt = lower_third.lower_third_band_height(cfg, vh)
+            if _valign == "bottom":
+                y_off_virt = max(0, pb_h_virt - band_h_virt)
+            elif _valign == "center":
+                y_off_virt = max(0, (pb_h_virt - band_h_virt) // 2)
+            else:
+                y_off_virt = 0
+            y_off_canvas = int(y_off_virt * scale)
+            band_h_canvas = max(1, int(band_h_virt * scale))
+
+            try:
+                band_resized = lt_img.resize((cw, band_h_canvas), Image.LANCZOS)
+                self._lt_preview_tk = ImageTk.PhotoImage(band_resized)
+                canvas.create_image(0, y_off_canvas, anchor="nw", image=self._lt_preview_tk)
+            except Exception:
+                pass
+        else:
+            # Standard lower third: full-frame image, just resize to canvas
+            try:
+                resized = lt_img.resize((cw, ch), Image.LANCZOS)
+                self._lt_preview_tk = ImageTk.PhotoImage(resized)
+                canvas.create_image(0, 0, anchor="nw", image=self._lt_preview_tk)
+            except Exception:
+                pass
 
     @staticmethod
     def _empty_download_history() -> dict:
@@ -3187,10 +3771,14 @@ class TranscriptApp:
     ) -> None:
         percent = max(0.0, min(100.0, float(percent)))
         total = max(1, self.download_total)
-        overall_percent = ((self.download_completed + (percent / 100.0)) / total) * 100.0
-        overall_percent = max(0.0, min(100.0, overall_percent))
-        self.download_overall_progress.configure(value=overall_percent)
+        self.download_overall_progress.set_segments(self.download_completed, total, percent)
         self.download_current_progress.configure(value=percent)
+        idx = getattr(self, "_current_download_card_index", None)
+        if idx is not None:
+            bar = getattr(self, "_moment_mini_bars", {}).get(idx)
+            if bar:
+                bar.configure(value=percent)
+        overall_percent = ((self.download_completed + (percent / 100.0)) / total) * 100.0
         details = f"Clip {percent:.1f}% • Global {overall_percent:.1f}%"
         size_progress = self._format_download_size_progress(percent, size)
         if size_progress:
@@ -3206,13 +3794,20 @@ class TranscriptApp:
         self.download_summary_var.set("Aucun téléchargement en cours.")
         self.download_detail_var.set("Aucun téléchargement pour le moment.")
         self._set_download_phase("en attente.")
-        self.download_overall_progress.configure(value=0, maximum=100)
-        self.download_current_progress.configure(value=0, maximum=100)
+        self.download_overall_progress.configure(value=0, maximum=100, mode="determinate")
+        self.download_overall_progress.clear_segments()
+        self.download_overall_progress.set_state("normal")
+        self.download_current_progress.configure(value=0, maximum=100, mode="determinate")
+        self.download_current_progress.set_state("normal")
         self.download_last_percent_logged = -1
         self.download_last_size = ""
         self.download_log.configure(state="normal")
         self.download_log.delete("1.0", tk.END)
         self.download_log.configure(state="disabled")
+        for bar in self._moment_mini_bars.values():
+            bar.configure(value=0, mode="determinate")
+            bar.set_state("normal")
+        self._current_download_card_index = None
 
     def generate(self) -> None:
         """Launch background transcript generation."""
@@ -4043,10 +4638,31 @@ class TranscriptApp:
     def _resolve_yt_dlp_cmd(self) -> List[str] | None:
         path = self._resolve_system_tool("yt-dlp")
         if path:
-            return [path]
-        if importlib.util.find_spec("yt_dlp") is not None:
-            return [sys.executable, "-m", "yt_dlp"]
-        return None
+            cmd = [path]
+        elif importlib.util.find_spec("yt_dlp") is not None:
+            cmd = [sys.executable, "-m", "yt_dlp"]
+        else:
+            return None
+        browser = self._selected_cookies_browser()
+        if browser:
+            # Avec cookies : laisser yt-dlp choisir le client (le cookie contient la session)
+            cmd += ["--cookies-from-browser", browser]
+        else:
+            # Sans cookies : android_vr ne demande ni PO Token ni JS challenge
+            cmd += ["--extractor-args", "youtube:player_client=android_vr"]
+        return cmd
+
+    def _selected_cookies_browser(self) -> str:
+        label = getattr(self, "ytdlp_cookies_browser_var", None)
+        if label is None:
+            return ""
+        return {
+            "Chrome": "chrome",
+            "Firefox": "firefox",
+            "Safari": "safari",
+            "Edge": "edge",
+            "Brave": "brave",
+        }.get(label.get(), "")
 
     @staticmethod
     def _prepend_to_path(directory: str) -> None:
@@ -4723,15 +5339,22 @@ class TranscriptApp:
                     "video_effect": video_effect,
                     "clip_label": clip_label,
                     "video_title": cached_title,
+                    "card_index": next(
+                        (
+                            i for i, m in enumerate(getattr(self, "last_most_viewed_moments", []))
+                            if m is moment or m.minute_index == moment.minute_index
+                        ),
+                        None,
+                    ),
                 }
             )
 
         if self.download_active:
             # Include current clip already in progress when extending the queue.
             self.download_total = self.download_completed + len(self.download_queue) + 1
-            total_safe = max(1, self.download_total)
-            overall_percent = (self.download_completed / total_safe) * 100.0
-            self.download_overall_progress.configure(maximum=100, value=overall_percent)
+            self.download_overall_progress.set_segments(
+                self.download_completed, self.download_total, 0.0
+            )
             self.master.after(
                 0,
                 self._append_download_log,
@@ -4867,9 +5490,9 @@ class TranscriptApp:
 
         if self.download_active:
             self.download_total = self.download_completed + len(self.download_queue) + 1
-            total_safe = max(1, self.download_total)
-            overall_percent = (self.download_completed / total_safe) * 100.0
-            self.download_overall_progress.configure(maximum=100, value=overall_percent)
+            self.download_overall_progress.set_segments(
+                self.download_completed, self.download_total, 0.0
+            )
             queued_label = "audio" if normalized_kind == "audio" else "vidéo entière"
             self.master.after(
                 0,
@@ -4888,11 +5511,19 @@ class TranscriptApp:
             self.download_thread = thread
             thread.start()
 
+    def _set_active_card_index(self, idx: int | None) -> None:
+        self._current_download_card_index = idx
+        if idx is not None:
+            bar = self._moment_mini_bars.get(idx)
+            if bar:
+                bar.configure(mode="indeterminate")
+
     def _download_worker(self) -> None:
         errors: List[str] = []
         try:
             while self.download_queue and not self.download_cancel.is_set():
                 item = self.download_queue.pop(0)
+                self.master.after(0, self._set_active_card_index, item.get("card_index"))
                 index = self.download_completed + 1
                 item_kind = str(item.get("kind", "clip")).strip() or "clip"
                 self.download_last_percent_logged = -1
@@ -4985,6 +5616,7 @@ class TranscriptApp:
         reported_output_path = ""
         cmd = self._build_media_download_command(item)
         saw_progress = False
+        stderr_lines: list[str] = []
         self.master.after(0, self._set_download_phase, "démarrage de yt-dlp")
         try:
             self.download_process = subprocess.Popen(
@@ -5002,6 +5634,7 @@ class TranscriptApp:
                 clean = line.strip()
                 if clean:
                     self.master.after(0, self._append_download_log, clean)
+                    stderr_lines.append(clean)
                 dest_match = DOWNLOAD_DEST_RE.search(clean)
                 merger_match = DOWNLOAD_MERGER_RE.search(clean)
                 already_match = DOWNLOAD_ALREADY_RE.search(clean)
@@ -5048,7 +5681,7 @@ class TranscriptApp:
         if self.download_cancel.is_set():
             return False, ""
         if code != 0:
-            return False, "Le téléchargement a échoué."
+            return False, _diagnose_ytdlp_error(stderr_lines)
 
         if saw_progress:
             self.master.after(
@@ -5092,7 +5725,7 @@ class TranscriptApp:
                     ),
                     "logo_opacity_percent": int(item.get("logo_opacity_percent", 100)),
                     "logo_display_duration": item.get("logo_display_duration") or None,
-            "shorts_blur_bg": bool(item.get("shorts_blur_bg", True)),
+                    "shorts_blur_bg": bool(item.get("shorts_blur_bg", True)),
                     "lower_third_config": item.get("lower_third_config"),
                     "intro_outro_enabled": bool(
                         item.get("intro_outro_enabled", False)
@@ -5196,6 +5829,7 @@ class TranscriptApp:
             item["url"],
         ]
         saw_progress = False
+        stderr_lines: list[str] = []
         self.master.after(0, self._set_download_phase, "démarrage de yt-dlp")
         try:
             self.download_process = subprocess.Popen(
@@ -5213,6 +5847,7 @@ class TranscriptApp:
                 clean = line.strip()
                 if clean:
                     self.master.after(0, self._append_download_log, clean)
+                    stderr_lines.append(clean)
                 dest_match = DOWNLOAD_DEST_RE.search(clean)
                 merger_match = DOWNLOAD_MERGER_RE.search(clean)
                 already_match = DOWNLOAD_ALREADY_RE.search(clean)
@@ -5259,7 +5894,7 @@ class TranscriptApp:
         if self.download_cancel.is_set():
             return False, ""
         if code != 0:
-            return False, "Le téléchargement a échoué."
+            return False, _diagnose_ytdlp_error(stderr_lines)
 
         if saw_progress:
             self.master.after(
@@ -5456,8 +6091,11 @@ class TranscriptApp:
         new_files = [
             path for path in candidates if str(path.resolve()) not in existing_files
         ]
-        pool = new_files or candidates
-        return max(pool, key=lambda path: path.stat().st_mtime)
+        # Never fall back to pre-existing files: they might be stale render
+        # outputs from a previous session, not the freshly downloaded clip.
+        if not new_files:
+            return None
+        return max(new_files, key=lambda path: path.stat().st_mtime)
 
     def _build_download_variant(
         self,
@@ -5537,7 +6175,84 @@ class TranscriptApp:
             logo_display_duration=logo_display_duration if (logo_display_duration or 0) > 0 else None,
             shorts_blur_bg=shorts_blur_bg,
         )
-        return video_renderer.render_video_variant(options, runner=subprocess.run)
+        # Probe total duration for render progress (clip_duration first, then ffprobe)
+        _total_dur = float(clip_duration or 0)
+        if not _total_dur:
+            try:
+                _total_dur = float(
+                    video_renderer._probe_media_duration(ffmpeg_path, input_path) or 0
+                )
+            except Exception:
+                _total_dur = 0.0
+
+        def _progress_runner(cmd, *, check, stdout, stderr, text):
+            if not hasattr(self, "master"):
+                return subprocess.run(cmd, check=check, stdout=stdout, stderr=stderr, text=text)
+            # Reset bar and switch to render phase in UI
+            self.master.after(0, lambda: self.download_current_progress.configure(value=0))
+            self.master.after(0, self._set_download_phase, "rendu ffmpeg…")
+
+            # Inject -progress pipe:1 before the output file (last arg)
+            output_file = cmd[-1]
+            progress_cmd = list(cmd[:-1]) + ["-progress", "pipe:1", output_file]
+
+            _encode_start = time.monotonic()
+
+            proc = subprocess.Popen(
+                progress_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            stderr_lines: list[str] = []
+
+            def _read_stderr() -> None:
+                for line in proc.stderr:
+                    stderr_lines.append(line.rstrip())
+
+            t = threading.Thread(target=_read_stderr, daemon=True)
+            t.start()
+
+            for line in proc.stdout:
+                if line.startswith("out_time_us="):
+                    try:
+                        us = int(line.strip().split("=")[1])
+                        elapsed = time.monotonic() - _encode_start
+                        if _total_dur > 0:
+                            pct = min(99.0, (us / 1_000_000) / _total_dur * 100)
+                            self.master.after(
+                                0, lambda p=pct: self.download_current_progress.configure(value=p)
+                            )
+                            if pct > 1.0:
+                                remaining = max(0.0, elapsed / (pct / 100.0) - elapsed)
+                                rem_m, rem_s = int(remaining) // 60, int(remaining) % 60
+                                time_str = f"reste ~{rem_m}:{rem_s:02d}"
+                            else:
+                                time_str = "calcul…"
+                            self.master.after(
+                                0, self._set_download_phase,
+                                f"rendu ffmpeg… {pct:.0f}% • {time_str}",
+                            )
+                        else:
+                            elapsed_s = int(elapsed)
+                            elapsed_str = f"{elapsed_s // 60}:{elapsed_s % 60:02d}"
+                            self.master.after(
+                                0, self._set_download_phase,
+                                f"rendu ffmpeg… {elapsed_str}",
+                            )
+                    except (ValueError, IndexError):
+                        pass
+
+            t.join()
+            proc.wait()
+
+            if check and proc.returncode != 0:
+                raise subprocess.CalledProcessError(
+                    proc.returncode, cmd, stderr="\n".join(stderr_lines)
+                )
+            return subprocess.CompletedProcess(cmd, proc.returncode)
+
+        return video_renderer.render_video_variant(options, runner=_progress_runner)
 
     @staticmethod
     def _logo_overlay_x_expr(position: str, margin: int = 36) -> str:
@@ -5556,8 +6271,8 @@ class TranscriptApp:
         self._reset_download_ui()
         if hasattr(self, "_download_status_shadow"):
             self._download_status_shadow.grid()
-        self.download_overall_progress.configure(maximum=100, value=0)
-        self.download_current_progress.configure(maximum=100, value=0)
+        self.download_overall_progress.set_segments(0, total, 0.0)
+        self.download_current_progress.configure(maximum=100, value=0, mode="indeterminate")
         self.download_summary_var.set(f"Téléchargement 0/{total} • 0%")
         self.download_detail_var.set("Préparation du téléchargement…")
         self._set_download_phase("initialisation de la file")
@@ -5567,8 +6282,15 @@ class TranscriptApp:
     def _update_download_ui(self, completed: int, total: int) -> None:
         total_safe = max(1, total)
         overall_percent = (completed / total_safe) * 100.0
-        self.download_overall_progress.configure(maximum=100, value=overall_percent)
+        self.download_overall_progress.set_segments(completed, total, 0.0)
         self.download_current_progress.configure(value=0)
+        # Mark the just-completed clip's mini-bar as success
+        idx = getattr(self, "_current_download_card_index", None)
+        if idx is not None:
+            bar = getattr(self, "_moment_mini_bars", {}).get(idx)
+            if bar:
+                bar.configure(value=100)
+                bar.set_state("success")
         self.download_detail_var.set(f"Global {overall_percent:.1f}%")
         if completed >= total:
             self.download_summary_var.set(
@@ -5576,6 +6298,7 @@ class TranscriptApp:
             )
             self._set_download_phase("tous les clips sont traités")
         else:
+            self.download_current_progress.configure(mode="indeterminate")
             self.download_summary_var.set(
                 f"Téléchargement {completed}/{total} • {overall_percent:.1f}%"
             )
@@ -5583,6 +6306,10 @@ class TranscriptApp:
 
     def _finish_download_ui(self, success: bool, message: str, cancelled: bool) -> None:
         if cancelled:
+            self.download_overall_progress.clear_segments()
+            self.download_overall_progress.set_state("error")
+            self.download_current_progress.configure(mode="determinate", value=0)
+            self.download_current_progress.set_state("error")
             self._set_status("Téléchargement annulé.", busy=False)
             self.download_detail_var.set("Téléchargement annulé.")
             self._set_download_phase("annulé par l'utilisateur")
@@ -5590,14 +6317,32 @@ class TranscriptApp:
             self.master.after(3000, self._hide_download_status)
             return
         if success:
+            total = self.download_total
+            self.download_overall_progress.set_segments(total, total, 0.0)
+            self.download_current_progress.configure(mode="determinate", value=100)
+            self.download_current_progress.set_state("success")
             self._set_status(
                 "Extraction terminée avec succès ✓", busy=False, success=True
             )
             self.download_detail_var.set("✔ Téléchargement terminé · 📁 Fichier prêt")
             self._set_download_phase("terminé")
             self._append_download_log("Téléchargements terminés.")
+            if sys.platform == "darwin":
+                label = f"{total} fichier(s) prêt(s)" if total > 1 else "Fichier prêt"
+                subprocess.Popen(
+                    [
+                        "osascript", "-e",
+                        f'display notification "{label}" with title "Téléchargement terminé" sound name "Glass"',
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
             self.master.after(5000, self._hide_download_status)
         else:
+            self.download_overall_progress.clear_segments()
+            self.download_overall_progress.set_state("error")
+            self.download_current_progress.configure(mode="determinate", value=0)
+            self.download_current_progress.set_state("error")
             self._set_status("Erreur lors du téléchargement.", busy=False, error=True)
             self.download_detail_var.set("Erreur lors du téléchargement.")
             self._set_download_phase("échec")
