@@ -1557,10 +1557,7 @@ def test_build_download_variant_adds_intro_progress_and_watermark(
         "scale=230:-1:flags=lanczos+accurate_rnd+full_chroma_int"
         in filter_complex
     )
-    assert (
-        "geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':"
-        "a='alpha(X,Y)*(0.50+0.25*sin(T*1.0))'"
-    ) in filter_complex
+    assert "colorchannelmixer=aa=0.75" in filter_complex
     assert "[watermark]overlay=1594:54:format=auto" in filter_complex
 
 
@@ -1793,6 +1790,7 @@ def test_log_download_percent_steps_logs_each_integer_percent() -> None:
 def test_enqueue_downloads_updates_total_when_queue_is_active() -> None:
     app = gui.TranscriptApp.__new__(gui.TranscriptApp)
     app.download_queue = [{"url": "existing"}]
+    app.download_queue_lock = threading.Lock()
     app.download_active = True
     app.download_completed = 1
     app.download_total = 3
@@ -1824,6 +1822,7 @@ def test_enqueue_downloads_updates_total_when_queue_is_active() -> None:
 def test_enqueue_downloads_snapshots_subtitle_chunks() -> None:
     app = gui.TranscriptApp.__new__(gui.TranscriptApp)
     app.download_queue = []
+    app.download_queue_lock = threading.Lock()
     app.download_active = True
     app.download_completed = 0
     app.download_total = 0
@@ -1864,6 +1863,7 @@ def test_enqueue_downloads_snapshots_subtitle_chunks() -> None:
 def test_enqueue_downloads_rejects_stale_subtitle_url() -> None:
     app = gui.TranscriptApp.__new__(gui.TranscriptApp)
     app.download_queue = []
+    app.download_queue_lock = threading.Lock()
     app.download_active = True
     app.download_completed = 0
     app.download_total = 0

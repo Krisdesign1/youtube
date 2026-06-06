@@ -241,9 +241,12 @@ class _CanvasProgress(tk.Canvas):
         return self._pal["accent"]
 
     def _draw(self) -> None:
-        self.delete("all")
-        w = self.winfo_width()
-        h = self.winfo_height()
+        try:
+            self.delete("all")
+            w = self.winfo_width()
+            h = self.winfo_height()
+        except tk.TclError:
+            return
         if w < 2 or h < 2:
             self.after(40, self._draw)
             return
@@ -315,7 +318,7 @@ class _CanvasProgress(tk.Canvas):
             try:
                 self.after_cancel(self._pulse_job)
             except Exception:
-                pass
+                LOGGER.debug("after_cancel failed — widget may be destroyed")
             self._pulse_job = None
 
     def _tick_pulse(self) -> None:
@@ -470,6 +473,7 @@ class TranscriptApp:
         self._moment_action_buttons = []
         self.download_process = None
         self.download_queue = []
+        self.download_queue_lock = threading.Lock()
         self.download_active = False
         self.download_cancel = threading.Event()
         self.download_total = 0
@@ -3488,9 +3492,14 @@ class TranscriptApp:
         if canvas is None:
             return
         try:
-            canvas.update_idletasks()
-            cw = max(1, canvas.winfo_width())
-            ch = max(1, canvas.winfo_height())
+            cw = canvas.winfo_width()
+            ch = canvas.winfo_height()
+            if cw < 2 or ch < 2:
+                # Widget not yet laid out — use declared dimensions
+                cw = int(canvas.cget("width"))
+                ch = int(canvas.cget("height"))
+            cw = max(1, cw)
+            ch = max(1, ch)
             canvas.delete("all")
         except tk.TclError:
             return
@@ -3589,7 +3598,7 @@ class TranscriptApp:
                 self._lt_preview_tk = ImageTk.PhotoImage(band_resized)
                 canvas.create_image(0, y_off_canvas, anchor="nw", image=self._lt_preview_tk)
             except Exception:
-                pass
+                LOGGER.debug("Lower third preview render failed", exc_info=True)
         else:
             # Standard lower third: full-frame image, just resize to canvas
             try:
@@ -3597,7 +3606,7 @@ class TranscriptApp:
                 self._lt_preview_tk = ImageTk.PhotoImage(resized)
                 canvas.create_image(0, 0, anchor="nw", image=self._lt_preview_tk)
             except Exception:
-                pass
+                LOGGER.debug("Lower third preview render failed", exc_info=True)
 
     @staticmethod
     def _empty_download_history() -> dict:
@@ -4227,7 +4236,11 @@ class TranscriptApp:
 
         start = int(moment.minute_index * 60)
         duration = min(8, self._get_clip_duration())
+        old_preview_dir = getattr(self, "_preview_tmpdir", None)
+        if old_preview_dir and os.path.isdir(old_preview_dir):
+            shutil.rmtree(old_preview_dir, ignore_errors=True)
         output_dir = tempfile.mkdtemp(prefix="youtube-script-preview-")
+        self._preview_tmpdir = output_dir
         subtitles_enabled = (
             bool(self.download_subtitles_enabled_var.get())
             and bool(self.last_transcript_chunks)
@@ -4277,9 +4290,12 @@ class TranscriptApp:
         thread.start()
 
     def _preview_worker(self, job_id: int, item: dict) -> None:
+        output_dir: str = item.get("output_dir", "")
         try:
             final_path = self._render_preview_clip(item)
         except RuntimeError as error:
+            if output_dir and os.path.isdir(output_dir):
+                shutil.rmtree(output_dir, ignore_errors=True)
             if self._should_ignore_result(job_id):
                 return
             self.master.after(0, self._finish_preview_ui, False, str(error), None)
@@ -4288,6 +4304,8 @@ class TranscriptApp:
             self.preview_thread = None
 
         if self._should_ignore_result(job_id):
+            if output_dir and os.path.isdir(output_dir):
+                shutil.rmtree(output_dir, ignore_errors=True)
             return
         self.master.after(0, self._finish_preview_ui, True, "", final_path)
 
@@ -4365,7 +4383,9 @@ class TranscriptApp:
                 text=True,
                 bufsize=1,
             )
-            assert self.download_process.stderr is not None
+            if self.download_process.stderr is None:
+                raise RuntimeError("Impossible d'ouvrir le flux stderr du processus.")
+
             for line in self.download_process.stderr:
                 clean = line.strip()
                 if clean:
@@ -5292,6 +5312,7 @@ class TranscriptApp:
             if subtitles_allowed
             else []
         )
+        new_items = []
         for moment in moments:
             start = moment.minute_index * 60
             clip_label = self._build_moment_filename_label(moment)
@@ -5299,7 +5320,7 @@ class TranscriptApp:
             cached_title = ""
             if isinstance(title_cache, dict):
                 cached_title = str(title_cache.get(url, "")).strip()
-            self.download_queue.append(
+            new_items.append(
                 {
                     "url": url,
                     "output_dir": output_dir,
@@ -5348,10 +5369,13 @@ class TranscriptApp:
                     ),
                 }
             )
+        with self.download_queue_lock:
+            self.download_queue.extend(new_items)
+            queue_len = len(self.download_queue)
 
         if self.download_active:
             # Include current clip already in progress when extending the queue.
-            self.download_total = self.download_completed + len(self.download_queue) + 1
+            self.download_total = self.download_completed + queue_len + 1
             self.download_overall_progress.set_segments(
                 self.download_completed, self.download_total, 0.0
             )
@@ -5363,7 +5387,7 @@ class TranscriptApp:
             return
 
         self.download_completed = 0
-        self.download_total = len(self.download_queue)
+        self.download_total = queue_len
         self._start_download_ui(self.download_total)
         if not self.download_active:
             self.download_active = True
@@ -5438,58 +5462,59 @@ class TranscriptApp:
         if isinstance(title_cache, dict):
             cached_title = str(title_cache.get(url, "")).strip()
 
-        self.download_queue.append(
-            {
-                "kind": normalized_kind,
-                "url": url,
-                "output_dir": output_dir,
-                "start": 0,
-                "duration": 0,
-                "format": item_format,
-                "yt_dlp_cmd": yt_dlp_cmd,
-                "shorts": media_shorts_mode,
-                "logo_enabled": media_logo_enabled,
-                "logo_path": logo_path if media_logo_enabled else "",
-                "logo_position": logo_position,
-                "logo_size_mode": logo_size_mode,
-                "logo_scale_percent": logo_scale_percent,
-                "logo_opacity_percent": logo_opacity_percent,
-                "logo_width_ratio": logo_width_ratio,
-                "logo_x_ratio": logo_x_ratio,
-                "logo_y_ratio": logo_y_ratio,
-                "logo_original_width": logo_original_width if media_logo_enabled else None,
-                "logo_original_height": logo_original_height if media_logo_enabled else None,
-                "logo_display_duration": logo_display_duration,
-                "shorts_blur_bg": shorts_blur_bg,
-                "lower_third_config": media_lower_third_config,
-                "lower_third_interval": lower_third_interval,
-                "lower_third_display_duration": lower_third_display_duration,
-                "intro_outro_enabled": media_intro_outro_enabled,
-                "intro_outro_channel_name": intro_outro_channel_name
-                if media_intro_outro_enabled
-                else "",
-                "intro_outro_hold_duration": intro_outro_hold_duration,
-                "intro_outro_bg_color": intro_outro_bg_color,
-                "intro_outro_text_color": intro_outro_text_color,
-                "progress_bar_enabled": media_progress_bar_enabled,
-                "animated_watermark_enabled": media_animated_watermark_enabled,
-                "watermark_logo_path": watermark_logo_path
-                if media_animated_watermark_enabled
-                else "",
-                "subtitles_enabled": media_subtitles_enabled,
-                "subtitle_style": subtitle_style,
-                "subtitle_chunks": copy.deepcopy(
-                    getattr(self, "last_transcript_chunks", [])
-                )
-                if media_subtitles_enabled
-                else [],
-                "video_effect": video_effect if normalized_kind == "full_video" else "none",
-                "video_title": cached_title,
-            }
-        )
+        new_item = {
+            "kind": normalized_kind,
+            "url": url,
+            "output_dir": output_dir,
+            "start": 0,
+            "duration": 0,
+            "format": item_format,
+            "yt_dlp_cmd": yt_dlp_cmd,
+            "shorts": media_shorts_mode,
+            "logo_enabled": media_logo_enabled,
+            "logo_path": logo_path if media_logo_enabled else "",
+            "logo_position": logo_position,
+            "logo_size_mode": logo_size_mode,
+            "logo_scale_percent": logo_scale_percent,
+            "logo_opacity_percent": logo_opacity_percent,
+            "logo_width_ratio": logo_width_ratio,
+            "logo_x_ratio": logo_x_ratio,
+            "logo_y_ratio": logo_y_ratio,
+            "logo_original_width": logo_original_width if media_logo_enabled else None,
+            "logo_original_height": logo_original_height if media_logo_enabled else None,
+            "logo_display_duration": logo_display_duration,
+            "shorts_blur_bg": shorts_blur_bg,
+            "lower_third_config": media_lower_third_config,
+            "lower_third_interval": lower_third_interval,
+            "lower_third_display_duration": lower_third_display_duration,
+            "intro_outro_enabled": media_intro_outro_enabled,
+            "intro_outro_channel_name": intro_outro_channel_name
+            if media_intro_outro_enabled
+            else "",
+            "intro_outro_hold_duration": intro_outro_hold_duration,
+            "intro_outro_bg_color": intro_outro_bg_color,
+            "intro_outro_text_color": intro_outro_text_color,
+            "progress_bar_enabled": media_progress_bar_enabled,
+            "animated_watermark_enabled": media_animated_watermark_enabled,
+            "watermark_logo_path": watermark_logo_path
+            if media_animated_watermark_enabled
+            else "",
+            "subtitles_enabled": media_subtitles_enabled,
+            "subtitle_style": subtitle_style,
+            "subtitle_chunks": copy.deepcopy(
+                getattr(self, "last_transcript_chunks", [])
+            )
+            if media_subtitles_enabled
+            else [],
+            "video_effect": video_effect if normalized_kind == "full_video" else "none",
+            "video_title": cached_title,
+        }
+        with self.download_queue_lock:
+            self.download_queue.append(new_item)
+            queue_len = len(self.download_queue)
 
         if self.download_active:
-            self.download_total = self.download_completed + len(self.download_queue) + 1
+            self.download_total = self.download_completed + queue_len + 1
             self.download_overall_progress.set_segments(
                 self.download_completed, self.download_total, 0.0
             )
@@ -5502,7 +5527,7 @@ class TranscriptApp:
             return
 
         self.download_completed = 0
-        self.download_total = len(self.download_queue)
+        self.download_total = queue_len
         self._start_download_ui(self.download_total)
         if not self.download_active:
             self.download_active = True
@@ -5521,8 +5546,11 @@ class TranscriptApp:
     def _download_worker(self) -> None:
         errors: List[str] = []
         try:
-            while self.download_queue and not self.download_cancel.is_set():
-                item = self.download_queue.pop(0)
+            while not self.download_cancel.is_set():
+                with self.download_queue_lock:
+                    if not self.download_queue:
+                        break
+                    item = self.download_queue.pop(0)
                 self.master.after(0, self._set_active_card_index, item.get("card_index"))
                 index = self.download_completed + 1
                 item_kind = str(item.get("kind", "clip")).strip() or "clip"
@@ -5597,7 +5625,8 @@ class TranscriptApp:
             message = errors[-1] if errors else ""
             self.master.after(0, self._finish_download_ui, success, message, cancelled)
             self.download_active = False
-            self.download_queue = []
+            with self.download_queue_lock:
+                self.download_queue = []
             self.download_cancel.clear()
             self.download_thread = None
 
@@ -5626,7 +5655,9 @@ class TranscriptApp:
                 text=True,
                 bufsize=1,
             )
-            assert self.download_process.stderr is not None
+            if self.download_process.stderr is None:
+                raise RuntimeError("Impossible d'ouvrir le flux stderr du processus.")
+
             for line in self.download_process.stderr:
                 if self.download_cancel.is_set():
                     self.download_process.terminate()
@@ -5839,7 +5870,9 @@ class TranscriptApp:
                 text=True,
                 bufsize=1,
             )
-            assert self.download_process.stderr is not None
+            if self.download_process.stderr is None:
+                raise RuntimeError("Impossible d'ouvrir le flux stderr du processus.")
+
             for line in self.download_process.stderr:
                 if self.download_cancel.is_set():
                     self.download_process.terminate()
@@ -6398,7 +6431,8 @@ class TranscriptApp:
             self.download_cancel.set()
             if self.download_process and self.download_process.poll() is None:
                 self.download_process.terminate()
-            self.download_queue = []
+            with self.download_queue_lock:
+                self.download_queue = []
             self.status_var.set("Annulation du téléchargement…")
             self._set_download_phase("annulation en cours")
             return

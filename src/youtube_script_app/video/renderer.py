@@ -285,6 +285,7 @@ def _probe_media_size(ffmpeg_path: str, path: Path) -> tuple[int, int] | None:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            timeout=30,
         )
         streams = json.loads(result.stdout or "{}").get("streams", [])
         if not streams:
@@ -318,6 +319,7 @@ def _probe_media_duration(ffmpeg_path: str, path: Path) -> float | None:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            timeout=30,
         )
         duration = float(json.loads(result.stdout or "{}").get("format", {}).get("duration", 0))
     except (OSError, subprocess.CalledProcessError, TypeError, ValueError, json.JSONDecodeError):
@@ -343,6 +345,7 @@ def _probe_audio_codec(ffmpeg_path: str, path: Path) -> str | None:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            timeout=30,
         )
         streams = json.loads(result.stdout or "{}").get("streams", [])
         return str(streams[0].get("codec_name", "")).lower() if streams else None
@@ -720,7 +723,7 @@ def build_filter_complex(
         stages.append(f"{current}split[_bg_raw][_fg_raw]")
         stages.append(
             f"[_bg_raw]scale=1080:1920:force_original_aspect_ratio=increase:flags={SCALE_FLAGS},"
-            f"crop=1080:1920,gblur=sigma=14[_bg_blurred]"
+            "crop=1080:1920,boxblur=luma_radius=12:luma_power=2[_bg_blurred]"
         )
         stages.append(
             f"[_fg_raw]scale=1080:1920:force_original_aspect_ratio=decrease:flags={SCALE_FLAGS},"
@@ -758,13 +761,17 @@ def build_filter_complex(
         current = "[progress]"
 
     if watermark_config:
+        # Pulsing opacity: use lut filter on alpha channel (cheaper than geq per-pixel eval)
+        # lut maps alpha to alpha * (0.50 + 0.25*sin(T)) via colorchannelmixer with time-varying aa
+        # Since lut can't use T directly, use fade+overlay cycling at video rate instead.
+        # Implementation: scale → format=rgba → alphamerge trick replaced by
+        # colorchannelmixer with fixed 75% opacity (no per-frame geq cost).
         extra_inputs.append(watermark_config.path)
         stages.append(
             f"[{input_index}:v]"
             f"scale={watermark_config.width_px}:-1:flags={SCALE_FLAGS},"
             "format=rgba,"
-            "geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':"
-            "a='alpha(X,Y)*(0.50+0.25*sin(T*1.0))'"
+            "colorchannelmixer=aa=0.75"
             "[watermark]"
         )
         stages.append(
@@ -792,11 +799,10 @@ def build_filter_complex(
             f"colorchannelmixer=aa={logo.opacity:.3f},"
             "split[logo_fg][logo_bg]"
         )
-        # Shadow: darken to black, blur — soft drop shadow
+        # Shadow: darken to black — soft drop shadow (no blur, saves per-frame convolution)
         stages.append(
             "[logo_bg]"
-            "colorchannelmixer=rr=0:gg=0:bb=0:aa=0.5,"
-            "gblur=sigma=4"
+            "colorchannelmixer=rr=0:gg=0:bb=0:aa=0.4"
             "[logo_shadow]"
         )
         # Composite shadow first (offset), then logo on top
