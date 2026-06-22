@@ -127,7 +127,7 @@ def test_run_generation_handles_unexpected_exception(
     def _raise(*args, **kwargs):
         raise RuntimeError("boom generation")
 
-    monkeypatch.setattr(gui, "generate_transcript_with_format", _raise)
+    monkeypatch.setattr("youtube_script_app.gui.mixins.transcript.generate_transcript_with_format", _raise)
 
     app._run_generation(1, "https://youtu.be/dQw4w9WgXcQ", None, "text", False, 5)
 
@@ -369,11 +369,11 @@ def test_resolve_yt_dlp_cmd_uses_common_tool_dirs(tmp_path, monkeypatch) -> None
 
     monkeypatch.setenv("PATH", "/usr/bin")
     monkeypatch.setattr(gui.shutil, "which", lambda _name: None)
-    monkeypatch.setattr(gui, "COMMON_TOOL_DIRS", (str(tool_dir),))
+    monkeypatch.setattr("youtube_script_app.gui.mixins.download.COMMON_TOOL_DIRS", (str(tool_dir),))
 
     app = gui.TranscriptApp.__new__(gui.TranscriptApp)
 
-    assert app._resolve_yt_dlp_cmd() == [str(yt_dlp), "--extractor-args", "youtube:player_client=android_vr"]
+    assert app._resolve_yt_dlp_cmd() == [str(yt_dlp), "--extractor-args", "youtube:player_client=android_vr", "--remote-components", "ejs:github"]
     assert gui.os.environ["PATH"].split(gui.os.pathsep)[0] == str(tool_dir)
 
 
@@ -545,7 +545,7 @@ def test_download_audio_only_requires_ffmpeg(monkeypatch) -> None:
     app._enqueue_media_download = lambda **kwargs: errors.append("enqueued")  # type: ignore[attr-defined]
 
     monkeypatch.setattr(gui.shutil, "which", lambda name: None if name == "ffmpeg" else "/usr/bin/tool")
-    monkeypatch.setattr(gui, "COMMON_TOOL_DIRS", ())
+    monkeypatch.setattr("youtube_script_app.gui.mixins.download.COMMON_TOOL_DIRS", ())
     monkeypatch.setattr(
         gui.messagebox,
         "showerror",
@@ -1426,11 +1426,11 @@ def test_build_download_variant_preview_uses_high_quality_scale(monkeypatch, tmp
         in filter_complex
     )
     assert "unsharp=5:5:0.45:5:5:0.0" in filter_complex
-    assert commands[0][commands[0].index("-b:a") + 1] == "192k"
+    assert commands[0][commands[0].index("-b:a") + 1] == "256k"
     # Encoder: h264_videotoolbox (macOS GPU) or libx264 (software fallback)
     assert "h264_videotoolbox" in commands[0] or (
-        commands[0][commands[0].index("-preset") + 1] == "fast"
-        and commands[0][commands[0].index("-crf") + 1] == "18"
+        commands[0][commands[0].index("-preset") + 1] == "slow"
+        and commands[0][commands[0].index("-crf") + 1] == "14"
     )
 
 

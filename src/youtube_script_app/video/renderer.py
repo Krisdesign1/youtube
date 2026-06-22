@@ -22,28 +22,12 @@ _SUBPROCESS_RUN = subprocess.run
 
 @functools.lru_cache(maxsize=4)
 def _detect_hw_video_encoder(ffmpeg_path: str) -> tuple[str, list[str]]:
-    """Return (encoder_name, extra_args). Tries VideoToolbox on macOS, falls back to libx264."""
-    if sys.platform == "darwin":
-        try:
-            # _SUBPROCESS_RUN holds the real subprocess.run captured at import time —
-            # unaffected by monkeypatching in tests that mock subprocess.run later.
-            result = _SUBPROCESS_RUN(
-                [
-                    ffmpeg_path, "-f", "lavfi", "-i", "nullsrc=s=2x2:r=1",
-                    "-t", "0.05", "-c:v", "h264_videotoolbox", "-f", "null", "-",
-                ],
-                capture_output=True,
-                timeout=10,
-            )
-            if result.returncode == 0:
-                return "h264_videotoolbox", ["-q:v", "65", "-pix_fmt", "yuv420p"]
-        except (OSError, subprocess.TimeoutExpired, AttributeError, TypeError):
-            pass
+    """Always use libx264 for maximum quality consistency."""
     return "libx264", ["-preset", VIDEO_ENCODER_PRESET, "-crf", VIDEO_ENCODER_CRF, "-pix_fmt", "yuv420p"]
 
-VIDEO_ENCODER_PRESET = "fast"
-VIDEO_ENCODER_CRF = "18"
-AUDIO_ENCODER_BITRATE = "192k"
+VIDEO_ENCODER_PRESET = "slow"
+VIDEO_ENCODER_CRF = "14"
+AUDIO_ENCODER_BITRATE = "256k"
 SCALE_FLAGS = "lanczos+accurate_rnd+full_chroma_int"
 # Upscaling below this short edge. Set to 0 to disable forced upscale.
 # Forcing 360p → 1080p adds no real detail and degrades perceived quality.

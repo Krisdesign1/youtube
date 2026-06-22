@@ -18,10 +18,51 @@ if [[ "$OS_NAME" == "Darwin" && -f "$ICON_PATH" ]]; then
 fi
 
 build_gui() {
+  # Exclude unused PIL image plugins to reduce bundle size
+  EXCLUDE_PIL=(
+    --exclude-module PIL.BmpImagePlugin
+    --exclude-module PIL.DdsImagePlugin
+    --exclude-module PIL.FitsImagePlugin
+    --exclude-module PIL.FliImagePlugin
+    --exclude-module PIL.FpxImagePlugin
+    --exclude-module PIL.GbrImagePlugin
+    --exclude-module PIL.GifImagePlugin
+    --exclude-module PIL.Hdf5StubImagePlugin
+    --exclude-module PIL.IcnsImagePlugin
+    --exclude-module PIL.IcoImagePlugin
+    --exclude-module PIL.ImImagePlugin
+    --exclude-module PIL.ImtImagePlugin
+    --exclude-module PIL.IptcImagePlugin
+    --exclude-module PIL.McIdasImagePlugin
+    --exclude-module PIL.MicImagePlugin
+    --exclude-module PIL.MpoImagePlugin
+    --exclude-module PIL.MspImagePlugin
+    --exclude-module PIL.PalmImagePlugin
+    --exclude-module PIL.PcdImagePlugin
+    --exclude-module PIL.PcxImagePlugin
+    --exclude-module PIL.PdfImagePlugin
+    --exclude-module PIL.PixarImagePlugin
+    --exclude-module PIL.PpmImagePlugin
+    --exclude-module PIL.PsdImagePlugin
+    --exclude-module PIL.QoiImagePlugin
+    --exclude-module PIL.SgiImagePlugin
+    --exclude-module PIL.SpiderImagePlugin
+    --exclude-module PIL.SunImagePlugin
+    --exclude-module PIL.TgaImagePlugin
+    --exclude-module PIL.TiffImagePlugin
+    --exclude-module PIL.WalImageFile
+    --exclude-module PIL.XbmImagePlugin
+    --exclude-module PIL.XpmImagePlugin
+    --exclude-module PIL.XVThumbImagePlugin
+    --exclude-module tkinter.test
+    --exclude-module unittest
+    --exclude-module xmlrpc
+    --exclude-module pydoc
+  )
   if [[ "$OS_NAME" == "Darwin" ]]; then
-    "$PYTHON_BIN" -m PyInstaller "${PYINSTALLER_COMMON[@]}" "${PYINSTALLER_ICON_ARGS[@]}" "$GUI_ENTRYPOINT" --windowed --name youtube-script-gui --specpath "$SPEC_DIR"
+    "$PYTHON_BIN" -m PyInstaller "${PYINSTALLER_COMMON[@]}" "${PYINSTALLER_ICON_ARGS[@]}" "${EXCLUDE_PIL[@]}" "$GUI_ENTRYPOINT" --windowed --name youtube-script-gui --specpath "$SPEC_DIR"
   else
-    "$PYTHON_BIN" -m PyInstaller "${PYINSTALLER_COMMON[@]}" "$GUI_ENTRYPOINT" --onefile --windowed --name youtube-script-gui --specpath "$SPEC_DIR"
+    "$PYTHON_BIN" -m PyInstaller "${PYINSTALLER_COMMON[@]}" "${EXCLUDE_PIL[@]}" "$GUI_ENTRYPOINT" --onefile --windowed --name youtube-script-gui --specpath "$SPEC_DIR"
   fi
 }
 
