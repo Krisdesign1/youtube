@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.eggs/
+pip-wheel-metadata/
+
+# Virtualenv
+.venv/
+venv/
+env/
+
+# Build / Distribution
+build/
+dist/
+
+# Tests
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# macOS
+.DS_Store
+
+# Credentials / Tokens
+client_secrets.json
+.env
+.env.*
+*.json
+!pyproject.toml
+
+# Local media outputs
+/downloads/
+/exports/
+*.mp4
+*.webm
+*.mp3
+*.m4a
+*.wav
+*.ass
+*.srt
+*.log
+
+# IDE
+.vscode/
+.idea/
+.claude/

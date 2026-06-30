@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "youtube-script-app"
+version = "0.1.0"
+description = "Générateur de script YouTube et téléchargeur vidéo/audio"
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["youtube", "transcript", "yt-dlp", "ffmpeg", "tkinter", "cli"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Environment :: MacOS X",
+  "Environment :: Win32 (MS Windows)",
+  "Intended Audience :: End Users/Desktop",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Multimedia :: Video",
+  "Topic :: Utilities",
+]
+dependencies = [
+  "Pillow>=10.0.0",
+  "youtube-transcript-api>=0.6.2",
+  "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+build = ["pyinstaller>=6.0.0"]
+dev = ["pytest>=8.0.0"]
+media = ["yt-dlp>=2024.1.0"]
+
+[project.scripts]
+youtube-script = "youtube_script_app.base:main"
+
+[project.gui-scripts]
+youtube-script-gui = "youtube_script_app.gui:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["youtube_script_app*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-ra"
