@@ -2218,3 +2218,172 @@ def test_build_moment_filename_label_uses_clip_text() -> None:
     label = app._build_moment_filename_label(_DummyMoment(minute_index=1, excerpt="fallback"))
 
     assert label == "Nom extrait"
+
+
+# ---------------------------------------------------------------------------
+# Exe / frozen-context tests
+# ---------------------------------------------------------------------------
+
+def test_resolve_yt_dlp_cmd_returns_none_when_frozen_and_no_binary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In a frozen PyInstaller exe sys.executable is the .exe itself, not Python.
+    The yt_dlp module fallback must be suppressed to avoid returning a broken cmd."""
+    import sys as _sys
+    import importlib.util as _ilu
+
+    app = gui.TranscriptApp.__new__(gui.TranscriptApp)
+    monkeypatch.setattr(gui.shutil, "which", lambda _name: None)
+    monkeypatch.setattr("youtube_script_app.gui.mixins.download.COMMON_TOOL_DIRS", ())
+    monkeypatch.setattr(_sys, "frozen", True, raising=False)
+    monkeypatch.setattr(_ilu, "find_spec", lambda _name: object())  # pretend yt_dlp installed
+
+    result = app._resolve_yt_dlp_cmd()
+
+    assert result is None, "frozen exe must not fall back to sys.executable -m yt_dlp"
+
+
+def test_resolve_yt_dlp_cmd_uses_module_fallback_when_not_frozen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Outside a frozen exe, the yt_dlp Python module fallback is valid."""
+    import sys as _sys
+    import importlib.util as _ilu
+
+    app = gui.TranscriptApp.__new__(gui.TranscriptApp)
+    monkeypatch.setattr(gui.shutil, "which", lambda _name: None)
+    monkeypatch.setattr("youtube_script_app.gui.mixins.download.COMMON_TOOL_DIRS", ())
+    monkeypatch.delattr(_sys, "frozen", raising=False)
+    monkeypatch.setattr(_ilu, "find_spec", lambda _name: object())  # pretend yt_dlp installed
+    app.ytdlp_cookies_browser_var = _DummyVar()
+
+    result = app._resolve_yt_dlp_cmd()
+
+    assert result is not None
+    assert result[0] == _sys.executable
+    assert "--no-update" in result
+
+
+def test_enqueue_media_download_updates_total_when_queue_is_active() -> None:
+    """When a download is already running, enqueue_media_download must update
+    the total counter and return without spawning a second worker thread."""
+    app = gui.TranscriptApp.__new__(gui.TranscriptApp)
+    app.download_queue = []
+    app.download_queue_lock = threading.Lock()
+    app.download_active = True
+    app.download_completed = 1
+    app.download_total = 2
+    app.download_overall_progress = _DummyProgress()
+    app.master = _ImmediateMaster()
+    app._append_download_log = lambda _line: None  # type: ignore[attr-defined]
+    app.last_transcript_chunks = []
+    app.last_url = ""
+    app.video_title_cache = {}
+
+    threads_started: list[threading.Thread] = []
+    _orig_start = threading.Thread.start
+
+    def _track_start(self_t):
+        threads_started.append(self_t)
+        _orig_start(self_t)
+
+    original_thread_start = threading.Thread.start
+    threading.Thread.start = _track_start  # type: ignore[method-assign]
+    try:
+        app._enqueue_media_download(
+            url="https://youtu.be/abc",
+            output_dir="/tmp",
+            video_format="mp4",
+            yt_dlp_cmd=["yt-dlp"],
+            kind="full_video",
+        )
+    finally:
+        threading.Thread.start = original_thread_start  # type: ignore[method-assign]
+
+    assert not threads_started, "no new worker thread must be spawned when already active"
+    assert app.download_total == 3  # 1 completed + 1 in queue + 1 extra safety margin
+
+
+def test_enqueue_media_download_starts_worker_when_inactive() -> None:
+    """When no download is active, enqueue_media_download must set download_active
+    and start exactly one worker thread."""
+    app = gui.TranscriptApp.__new__(gui.TranscriptApp)
+    app.download_queue = []
+    app.download_queue_lock = threading.Lock()
+    app.download_active = False
+    app.download_completed = 0
+    app.download_total = 0
+    app.download_overall_progress = _DummyProgress()
+    app.master = _ImmediateMaster()
+    app.last_transcript_chunks = []
+    app.last_url = ""
+    app.video_title_cache = {}
+
+    started: list[bool] = []
+    app.download_cancel = threading.Event()
+
+    def _fake_start_ui(total: int) -> None:
+        pass
+
+    def _fake_worker() -> None:
+        started.append(True)
+
+    app._start_download_ui = _fake_start_ui  # type: ignore[attr-defined]
+
+    threads_spawned: list[threading.Thread] = []
+    _orig_init = threading.Thread.__init__
+
+    def _capture_thread(self_t, target=None, **kwargs):
+        _orig_init(self_t, target=_fake_worker, **kwargs)
+        threads_spawned.append(self_t)
+
+    threading.Thread.__init__ = _capture_thread  # type: ignore[method-assign]
+    try:
+        app._enqueue_media_download(
+            url="https://youtu.be/abc",
+            output_dir="/tmp",
+            video_format="mp4",
+            yt_dlp_cmd=["yt-dlp"],
+            kind="full_video",
+        )
+    finally:
+        threading.Thread.__init__ = _orig_init  # type: ignore[method-assign]
+
+    assert app.download_active is True
+    assert len(threads_spawned) == 1, "exactly one worker thread must be spawned"
+
+
+def test_enqueue_media_download_audio_does_not_apply_video_options() -> None:
+    """Audio downloads must not carry logo/shorts/subtitles/effect options."""
+    app = gui.TranscriptApp.__new__(gui.TranscriptApp)
+    app.download_queue = []
+    app.download_queue_lock = threading.Lock()
+    app.download_active = True
+    app.download_completed = 0
+    app.download_total = 1
+    app.download_overall_progress = _DummyProgress()
+    app.master = _ImmediateMaster()
+    app._append_download_log = lambda _line: None  # type: ignore[attr-defined]
+    app.last_transcript_chunks = [{"text": "x", "start": 0.0, "duration": 1.0}]
+    app.last_url = "https://youtu.be/abc"
+    app.video_title_cache = {}
+
+    app._enqueue_media_download(
+        url="https://youtu.be/abc",
+        output_dir="/tmp",
+        video_format="mp4",
+        yt_dlp_cmd=["yt-dlp"],
+        kind="audio",
+        logo_enabled=True,
+        logo_path="/logo.png",
+        shorts_mode=True,
+        subtitles_enabled=True,
+        video_effect="cinematic",
+    )
+
+    item = app.download_queue[-1]
+    assert item["kind"] == "audio"
+    assert item["logo_enabled"] is False, "audio must not carry logo"
+    assert item["shorts"] is False, "audio must not carry shorts mode"
+    assert item["subtitles_enabled"] is False, "audio must not carry subtitles"
+    assert item["video_effect"] == "none", "audio must not carry video effect"

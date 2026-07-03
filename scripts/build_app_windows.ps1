@@ -57,7 +57,21 @@ function Invoke-PyInstaller {
 }
 
 function Build-Gui {
-    $args = @(
+    $hiddenImports = @(
+        "--hidden-import", "youtube_transcript_api",
+        "--hidden-import", "youtube_transcript_api._transcripts",
+        "--hidden-import", "youtube_transcript_api.proxies",
+        "--hidden-import", "xml.etree.ElementTree",
+        "--hidden-import", "PIL.Image",
+        "--hidden-import", "PIL.ImageDraw",
+        "--hidden-import", "PIL.ImageFont",
+        "--hidden-import", "PIL.PngImagePlugin",
+        "--hidden-import", "PIL.JpegImagePlugin",
+        "--hidden-import", "PIL.BmpImagePlugin",
+        "--hidden-import", "PIL.IcoImagePlugin",
+        "--hidden-import", "PIL.WebPImagePlugin"
+    )
+    $pyiArgs = @(
         "--paths", $SrcDir,
         "--onefile",
         "--windowed",
@@ -65,12 +79,12 @@ function Build-Gui {
         "--distpath", $DistDir,
         "--workpath", $WorkDir,
         "--specpath", $SpecDir
-    )
+    ) + $hiddenImports
     if (Test-Path $IconPath) {
-        $args += @("--icon", $IconPath)
+        $pyiArgs += @("--icon", $IconPath)
     }
-    $args += $GuiEntrypoint
-    Invoke-PyInstaller $args
+    $pyiArgs += $GuiEntrypoint
+    Invoke-PyInstaller $pyiArgs
 }
 
 function Build-Cli {

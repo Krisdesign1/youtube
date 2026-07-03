@@ -1026,7 +1026,8 @@ class DownloadMixin:
         path = self._resolve_system_tool("yt-dlp")
         if path:
             cmd = [path]
-        elif _ilu.find_spec("yt_dlp") is not None:
+        elif _ilu.find_spec("yt_dlp") is not None and not getattr(sys, "frozen", False):
+            # sys.executable points to the frozen .exe in PyInstaller — unusable as a Python runner
             cmd = [sys.executable, "-m", "yt_dlp"]
         else:
             return None
@@ -1335,8 +1336,9 @@ class DownloadMixin:
         with self.download_queue_lock:
             self.download_queue.append(new_item)
             queue_len = len(self.download_queue)
+            already_active = self.download_active
 
-        if self.download_active:
+        if already_active:
             self.download_total = self.download_completed + queue_len + 1
             self.download_overall_progress.set_segments(
                 self.download_completed, self.download_total, 0.0
@@ -1352,12 +1354,13 @@ class DownloadMixin:
         self.download_completed = 0
         self.download_total = queue_len
         self._start_download_ui(self.download_total)
-        if not self.download_active:
-            self.download_active = True
-            self.download_cancel.clear()
-            thread = threading.Thread(target=self._download_worker, daemon=True)
-            self.download_thread = thread
-            thread.start()
+        with self.download_queue_lock:
+            if not self.download_active:
+                self.download_active = True
+                self.download_cancel.clear()
+                thread = threading.Thread(target=self._download_worker, daemon=True)
+                self.download_thread = thread
+                thread.start()
 
     def _set_active_card_index(self, idx: int | None) -> None:
         self._current_download_card_index = idx
