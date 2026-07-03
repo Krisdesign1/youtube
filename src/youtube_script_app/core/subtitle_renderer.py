@@ -126,8 +126,14 @@ def ass_timestamp(seconds: float) -> str:
     return f"{hours}:{minute:02d}:{sec:02d}.{cs:02d}"
 
 
+_CONTROL_CHAR_TABLE = str.maketrans(
+    "", "", "".join(chr(i) for i in range(32) if i not in (9, 10, 13))
+)
+
+
 def escape_ass_text(text: str) -> str:
-    cleaned = str(text).replace("\n", " ").replace("\r", " ")
+    cleaned = str(text).translate(_CONTROL_CHAR_TABLE)
+    cleaned = cleaned.replace("\n", " ").replace("\r", " ")
     cleaned = cleaned.replace("{", "(").replace("}", ")")
     return " ".join(cleaned.split())
 
@@ -624,7 +630,8 @@ def escape_ass_path(path: str) -> str:
     """Echappe un chemin pour le filtre ffmpeg ``subtitles=``."""
     value = str(path)
     if platform.system() == "Windows":
-        value = value.replace("\\", "\\\\")
+        # Use forward slashes to avoid UNC path (\\server\share) double-escaping issues
+        value = value.replace("\\", "/")
         value = value.replace(":", r"\:")
         return value
 
@@ -659,7 +666,10 @@ def generate_subtitle_preview(
         None,
     )
 
-    image = Image.open(frame_path).convert("RGBA")
+    try:
+        image = Image.open(frame_path).convert("RGBA")
+    except (OSError, FileNotFoundError) as exc:
+        raise RuntimeError(f"Impossible d'ouvrir le frame : {frame_path} — {exc}") from exc
     if image.size != (video_width, video_height):
         image = image.resize((video_width, video_height), Image.LANCZOS)
 

@@ -137,7 +137,11 @@ def build_best_video_download_args(video_format: str) -> List[str]:
 def build_media_download_command(item: dict) -> List[str]:
     kind = str(item.get("kind", "full_video")).strip().lower()
     output_dir = str(item.get("output_dir", ""))
+    if not output_dir:
+        raise ValueError("Dossier de destination manquant pour le téléchargement.")
     url = str(item.get("url", "")).strip()
+    if not url:
+        raise ValueError("URL manquante pour le téléchargement.")
     yt_dlp_cmd = item.get("yt_dlp_cmd")
     cmd_prefix = list(yt_dlp_cmd) if isinstance(yt_dlp_cmd, (list, tuple)) else []
     if kind == "audio":

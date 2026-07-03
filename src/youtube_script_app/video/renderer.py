@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import logging
 import re
 import subprocess
 import json
@@ -526,13 +527,16 @@ def _filter_number(value: float) -> str:
 
 
 def _escape_drawtext_text(value: object) -> str:
-    text = str(value or "")
+    text = str(value or "").replace("\n", " ").replace("\r", " ")
     return (
         text.replace("\\", "\\\\")
         .replace(":", r"\:")
         .replace("'", r"\'")
+        .replace('"', r"\"")
         .replace(",", r"\,")
         .replace("%", r"\%")
+        .replace("[", r"\[")
+        .replace("]", r"\]")
     )
 
 
@@ -872,12 +876,14 @@ def render_video_variant(
     runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
 ) -> Path:
     input_path = Path(options.input_path)
-    if not input_path.exists():
+    try:
+        stat = input_path.stat()
+    except FileNotFoundError:
         raise RuntimeError(
             f"Fichier introuvable : {input_path.name}\n"
             "Le téléchargement a peut-être échoué ou le fichier a été déplacé."
         )
-    if input_path.stat().st_size == 0:
+    if stat.st_size == 0:
         raise RuntimeError(
             f"Fichier vide : {input_path.name}\n"
             "Le téléchargement est incomplet. Réessaie le téléchargement."
@@ -1055,8 +1061,7 @@ def render_video_variant(
                 y_px=watermark_y,
             )
 
-        import logging as _logging
-        _render_log = _logging.getLogger("youtube-script")
+        _render_log = logging.getLogger("youtube-script")
 
         def _run_render(
             subtitle_path: str | None = None,

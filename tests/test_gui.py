@@ -373,7 +373,7 @@ def test_resolve_yt_dlp_cmd_uses_common_tool_dirs(tmp_path, monkeypatch) -> None
 
     app = gui.TranscriptApp.__new__(gui.TranscriptApp)
 
-    assert app._resolve_yt_dlp_cmd() == [str(yt_dlp), "--extractor-args", "youtube:player_client=android_vr", "--remote-components", "ejs:github"]
+    assert app._resolve_yt_dlp_cmd() == [str(yt_dlp), "--no-update"]
     assert gui.os.environ["PATH"].split(gui.os.pathsep)[0] == str(tool_dir)
 
 
@@ -478,7 +478,7 @@ def test_download_full_video_enqueues_logo_options() -> None:
 
     assert captured["kind"] == "full_video"
     assert captured["logo_enabled"] is True
-    assert captured["logo_path"] == "/tmp/logo.png"
+    assert captured["logo_path"] == str(Path("/tmp/logo.png"))
     assert captured["logo_position"] == "bottom"
     assert captured["logo_size_mode"] == "relative"
     assert captured["logo_scale_percent"] == 42

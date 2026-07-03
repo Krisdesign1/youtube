@@ -317,7 +317,10 @@ def _generate_top_center_lower_third(
     output_path: str,
 ) -> str:
     """Centered-top variant: band-height PNG with symmetric gradient and vertical stacked layout."""
-    _render_top_center_lower_third_image(config, video_width, video_height).save(output_path, format="PNG")
+    try:
+        _render_top_center_lower_third_image(config, video_width, video_height).save(output_path, format="PNG")
+    except (OSError, PermissionError) as exc:
+        raise RuntimeError(f"Impossible de sauvegarder le lower third : {output_path} — {exc}") from exc
     return output_path
 
 

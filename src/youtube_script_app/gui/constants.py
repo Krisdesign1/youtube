@@ -35,6 +35,40 @@ DOWNLOAD_ALREADY_RE = re.compile(r"\[download\]\s+(.+?) has already been downloa
 INVALID_FILENAME_CHARS_RE = re.compile(r'[\x00-\x1f<>:"/\\|?*]+')
 FILENAME_SPACES_RE = re.compile(r"\s+")
 
+def _windows_tool_dirs() -> tuple[str, ...]:
+    try:
+        import os
+        import glob
+        from pathlib import Path
+        dirs: list[str] = []
+        local = os.environ.get("LOCALAPPDATA", "")
+        if local:
+            for pattern in (
+                r"Microsoft\WinGet\Packages\Gyan.FFmpeg*\*\bin",
+                r"Microsoft\WinGet\Packages\yt-dlp*\*",
+                r"Microsoft\WinGet\Links",
+            ):
+                for match in glob.glob(os.path.join(local, pattern)):
+                    try:
+                        dirs.append(str(Path(match).resolve()))
+                    except (OSError, ValueError):
+                        dirs.append(match)
+        for base in (
+            r"C:\Program Files\ffmpeg\bin",
+            r"C:\ffmpeg\bin",
+            r"C:\Program Files\yt-dlp",
+        ):
+            try:
+                if os.path.isdir(base):
+                    dirs.append(str(Path(base).resolve()))
+            except (OSError, ValueError):
+                pass
+        return tuple(dirs)
+    except Exception:
+        return ()
+
+
+import sys as _sys
 COMMON_TOOL_DIRS = (
     "/opt/homebrew/bin",
     "/usr/local/bin",
@@ -43,6 +77,7 @@ COMMON_TOOL_DIRS = (
     "/bin",
     "/usr/sbin",
     "/sbin",
+    *(_windows_tool_dirs() if _sys.platform == "win32" else ()),
 )
 
 _YTDLP_ERROR_PATTERNS: list[tuple[str, str]] = [

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 from datetime import datetime
@@ -138,7 +139,7 @@ def add_download_record(
 ) -> dict:
     url = str(item.get("url", "")).strip()
     if not url:
-        return json.loads(json.dumps(history, ensure_ascii=False))
+        return copy.deepcopy(history)
 
     key, video_id = history_key_for_url(url)
     timestamp = now or datetime.now().astimezone().isoformat(timespec="seconds")
@@ -198,7 +199,7 @@ def add_download_record(
             reverse=True,
         )[:300]
         history["links"] = dict(ordered)
-    return json.loads(json.dumps(history, ensure_ascii=False))
+    return copy.deepcopy(history)
 
 
 def format_download_history_lines(history: dict) -> List[str]:

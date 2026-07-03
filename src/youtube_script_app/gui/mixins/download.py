@@ -44,8 +44,11 @@ class DownloadMixin:
             return
         self.download_log.configure(state="normal")
         self.download_log.insert(tk.END, f"{line}\n")
-        if int(float(self.download_log.index("end-1c").split(".")[0])) > 200:
-            self.download_log.delete("1.0", "2.0")
+        try:
+            if int(float(self.download_log.index("end-1c").split(".")[0])) > 200:
+                self.download_log.delete("1.0", "2.0")
+        except (ValueError, IndexError):
+            pass
         self.download_log.configure(state="disabled")
         self.download_log.see(tk.END)
 
@@ -1062,10 +1065,15 @@ class DownloadMixin:
         if path:
             return path
         for directory in COMMON_TOOL_DIRS:
-            candidate = Path(directory) / executable
-            if candidate.is_file() and os.access(candidate, os.X_OK):
-                cls._prepend_to_path(directory)
-                return str(candidate)
+            candidates = [Path(directory) / executable]
+            if sys.platform == "win32" and not executable.lower().endswith(".exe"):
+                candidates.append(Path(directory) / (executable + ".exe"))
+            for candidate in candidates:
+                if candidate.is_file() and (
+                    sys.platform == "win32" or os.access(candidate, os.X_OK)
+                ):
+                    cls._prepend_to_path(directory)
+                    return str(candidate)
         return None
 
     def _pick_download_dir(self) -> str:
@@ -1186,8 +1194,9 @@ class DownloadMixin:
         with self.download_queue_lock:
             self.download_queue.extend(new_items)
             queue_len = len(self.download_queue)
+            already_active = self.download_active
 
-        if self.download_active:
+        if already_active:
             self.download_total = self.download_completed + queue_len + 1
             self.download_overall_progress.set_segments(
                 self.download_completed, self.download_total, 0.0
@@ -1202,12 +1211,13 @@ class DownloadMixin:
         self.download_completed = 0
         self.download_total = queue_len
         self._start_download_ui(self.download_total)
-        if not self.download_active:
-            self.download_active = True
-            self.download_cancel.clear()
-            thread = threading.Thread(target=self._download_worker, daemon=True)
-            self.download_thread = thread
-            thread.start()
+        with self.download_queue_lock:
+            if not self.download_active:
+                self.download_active = True
+                self.download_cancel.clear()
+                thread = threading.Thread(target=self._download_worker, daemon=True)
+                self.download_thread = thread
+                thread.start()
 
     def _enqueue_media_download(
         self,

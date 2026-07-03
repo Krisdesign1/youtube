@@ -303,12 +303,19 @@ def save_gui_settings(
     normalized = normalize_gui_settings(snapshot)
     if not isinstance(path, Path):
         return normalized
+    temp_path = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = path.with_suffix(f"{path.suffix}.tmp")
         with temp_path.open("w", encoding="utf-8") as file:
             json.dump(normalized, file, ensure_ascii=False, indent=2)
         temp_path.replace(path)
+        temp_path = None
     except OSError as error:
         logger.warning("Impossible d'enregistrer les preferences GUI: %s", error)
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
     return normalized
