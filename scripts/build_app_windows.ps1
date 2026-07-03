@@ -23,8 +23,8 @@ $GuiEntrypoint = Join-Path $RootDir "scripts\entrypoints\gui.py"
 $IconPath = Join-Path $RootDir "assets\app.ico"
 
 function Invoke-Python {
-    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
-    & $PythonBin @Args
+    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$PyArgs)
+    & $PythonBin @PyArgs
 }
 
 function New-AppVenv {
@@ -52,8 +52,8 @@ function Install-App {
 }
 
 function Invoke-PyInstaller {
-    param([string[]]$Args)
-    Invoke-Python -m PyInstaller @Args
+    param([string[]]$PyArgs)
+    Invoke-Python -m PyInstaller @PyArgs
 }
 
 function Build-Gui {
